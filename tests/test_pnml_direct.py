@@ -2,8 +2,8 @@ import unittest
 from unittest.mock import patch
 
 from app import create_app
-from app.services import pnml_postprocessor
-from app.services.llm_service import EmptyResponseError
+from app.services.llm_service import EmptyResponseError, LLMService
+from app.services.pnml_validator import PnmlValidator
 from config import TestingConfig
 
 PNML_DOC = (
@@ -16,30 +16,34 @@ PNML_DOC = (
 
 class TestPnmlExtraction(unittest.TestCase):
     def test_plain_pnml_is_returned_with_declaration(self):
-        result = pnml_postprocessor.extract_pnml(PNML_DOC)
+        result = LLMService._extract_pnml_document(PNML_DOC)
         self.assertTrue(result.startswith("<?xml"))
         self.assertIn(PNML_DOC, result)
 
     def test_markdown_fences_and_prose_are_stripped(self):
         raw = f"Sure! Here is your net:\n```xml\n{PNML_DOC}\n```\nEnjoy."
-        result = pnml_postprocessor.extract_pnml(raw)
+        result = LLMService._extract_pnml_document(raw)
         self.assertIn(PNML_DOC, result)
         self.assertNotIn("```", result)
         self.assertNotIn("Sure!", result)
 
     def test_reply_without_pnml_returns_none(self):
-        self.assertIsNone(pnml_postprocessor.extract_pnml("no net here"))
-        self.assertIsNone(pnml_postprocessor.extract_pnml(""))
-        self.assertIsNone(pnml_postprocessor.extract_pnml(None))
+        self.assertIsNone(LLMService._extract_pnml_document("no net here"))
+        self.assertIsNone(LLMService._extract_pnml_document(""))
+        self.assertIsNone(LLMService._extract_pnml_document(None))
 
 
-class TestPnmlValidationStub(unittest.TestCase):
-    def test_stub_reports_no_issues(self):
-        # TODO(pnml-demo): replace once real validators are registered.
-        self.assertEqual(pnml_postprocessor.validate_pnml(PNML_DOC), [])
+class TestPnmlValidatorStub(unittest.TestCase):
+    def test_sanitize_stub_passes_document_through(self):
+        # TODO(pnml-demo): replace once real repair heuristics exist.
+        self.assertEqual(PnmlValidator().sanitize_pnml(PNML_DOC), PNML_DOC)
+
+    def test_validate_stub_reports_no_issues(self):
+        # TODO(pnml-demo): replace once real checks are implemented.
+        self.assertEqual(PnmlValidator().validate_pnml(PNML_DOC), [])
 
     def test_repair_prompt_embeds_context(self):
-        prompt = pnml_postprocessor.build_repair_prompt(
+        prompt = LLMService()._build_pnml_repair_prompt(
             "ship the order", PNML_DOC, ["arc a1 connects two places"]
         )
         self.assertIn("ship the order", prompt)

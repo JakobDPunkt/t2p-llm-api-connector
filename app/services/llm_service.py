@@ -1,14 +1,18 @@
 import json
 import logging
+import re
 import time
 
 import google.generativeai as genai
 from flask import current_app
 from openai import OpenAI
 
-from app.services import model_registry, pnml_postprocessor
+from app.services import model_registry
 from app.services.model_validator import ModelValidator
+from app.services.pnml_validator import PnmlValidator
 from app.utils.prompt_builder import PromptBuilder, STRICT_JSON_REMINDER
+
+_PNML_BLOCK_RE = re.compile(r"<pnml\b.*?</pnml>", re.DOTALL | re.IGNORECASE)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,7 @@ class LLMService:
     def __init__(self):
         self.prompt_builder = PromptBuilder()
         self.model_validator = ModelValidator()
+        self.pnml_validator = PnmlValidator()
 
     @staticmethod
     def _config_value(name, default=None):
@@ -48,6 +53,23 @@ class LLMService:
         if start == -1 or end == -1 or end <= start:
             raise ValueError("Model output does not contain a JSON object.")
         return json.loads(content[start:end + 1])
+
+    @staticmethod
+    def _extract_pnml_document(text):
+        """Extract the PNML XML document from model output text.
+
+        Counterpart of ``_extract_json_object`` for the direct-PNML path:
+        replies may wrap the XML in markdown fences or surrounding prose
+        despite the system prompt forbidding it. Returns the
+        ``<pnml>...</pnml>`` block with an XML declaration, or ``None`` if
+        the reply contains none.
+        """
+        if not text:
+            return None
+        match = _PNML_BLOCK_RE.search(text)
+        if match is None:
+            return None
+        return f'<?xml version="1.0" encoding="UTF-8"?>\n{match.group(0)}'
 
     @staticmethod
     def _merge_known_elements(partials):
@@ -83,6 +105,28 @@ class LLMService:
             f"{issues_block}\n\n"
             "Current model:\n"
             f"{model_block}\n"
+        )
+
+    def _build_pnml_repair_prompt(self, user_text, pnml_xml, issues):
+        """Create a repair prompt from PNML validation findings.
+
+        Counterpart of ``_build_repair_prompt`` for the direct-PNML path.
+        TODO(pnml-demo): wording is a placeholder; the repair prompt is
+        engineered together with the system prompt once live data exists.
+        """
+        issues_block = "\n".join(f"- {issue}" for issue in issues)
+        return (
+            "You are repairing a PNML document to satisfy strict structural "
+            "rules.\n"
+            "Return exactly one well-formed PNML XML document and nothing "
+            "else.\n\n"
+            "Preserve ids where possible, but fix broken structure.\n\n"
+            "Process text:\n"
+            f"{user_text}\n\n"
+            "Validation issues to fix:\n"
+            f"{issues_block}\n\n"
+            "Current PNML:\n"
+            f"{pnml_xml}\n"
         )
 
     @staticmethod
@@ -638,16 +682,18 @@ class LLMService:
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
-        pnml = pnml_postprocessor.extract_pnml(raw_text)
+        pnml = self._extract_pnml_document(raw_text)
         if pnml is None:
             raise EmptyResponseError("Provider reply contained no PNML document.")
 
-        issues = pnml_postprocessor.validate_pnml(pnml)
+        # Same position as on the few-shot path: sanitize, then validate.
+        pnml = self.pnml_validator.sanitize_pnml(pnml)
+        issues = self.pnml_validator.validate_pnml(pnml, user_text)
         if issues:
-            # TODO(pnml-demo): run a bounded repair pass here via
-            # pnml_postprocessor.build_repair_prompt (the standard few-shot
-            # path runs exactly one). Until the retry policy is decided,
-            # issues are only logged and the PNML is returned as-is.
+            # TODO(pnml-demo): run one repair pass here via
+            # _build_pnml_repair_prompt (mirrors the few-shot path); the
+            # behaviour for issues remaining after repair is decided with
+            # Jakob. Until then issues are only logged.
             logger.warning(
                 "PNML validation found %d issue(s): %s",
                 len(issues),
