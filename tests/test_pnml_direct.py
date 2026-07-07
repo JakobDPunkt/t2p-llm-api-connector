@@ -20,6 +20,22 @@ def _net(inner, net_type=PT_NET_TYPE):
     return f'<pnml><net id="noID" type="{net_type}">{inner}</net></pnml>'
 
 
+# The contract example: passes every validation level.
+VALID_NET = _net(
+    '<place id="p1"><name><text>start</text></name>'
+    "<initialMarking><text>1</text></initialMarking></place>"
+    '<transition id="t1"><name><text>check order</text></name></transition>'
+    '<place id="p2"><name><text>end</text></name></place>'
+    '<arc id="a1" source="p1" target="t1"/>'
+    '<arc id="a2" source="t1" target="p2"/>'
+)
+
+# A marked start place, so only the level under test reports issues.
+MARKED_START = (
+    '<place id="p1"><initialMarking><text>1</text></initialMarking></place>'
+)
+
+
 class TestPnmlExtraction(unittest.TestCase):
     def test_plain_pnml_is_returned_with_declaration(self):
         result = LLMService._extract_pnml_document(PNML_DOC)
@@ -41,7 +57,7 @@ class TestPnmlExtraction(unittest.TestCase):
 
 class TestPnmlValidatorLevel0(unittest.TestCase):
     def test_valid_xml_passes(self):
-        self.assertEqual(PnmlValidator().validate_pnml(PNML_DOC), [])
+        self.assertEqual(PnmlValidator().validate_pnml(VALID_NET), [])
 
     def test_truncated_xml_is_reported(self):
         issues = PnmlValidator().validate_pnml("<pnml><net id='n1'>")
@@ -72,18 +88,10 @@ class TestPnmlValidatorLevel1(unittest.TestCase):
         )
 
     def test_contract_example_passes(self):
-        doc = _net(
-            '<place id="p1"><name><text>start</text></name>'
-            "<initialMarking><text>1</text></initialMarking></place>"
-            '<transition id="t1"><name><text>check order</text></name></transition>'
-            '<place id="p2"><name><text>end</text></name></place>'
-            '<arc id="a1" source="p1" target="t1"/>'
-            '<arc id="a2" source="t1" target="p2"/>'
-        )
-        self.assertEqual(PnmlValidator().validate_pnml(doc), [])
+        self.assertEqual(PnmlValidator().validate_pnml(VALID_NET), [])
 
     def test_namespaced_document_is_tolerated(self):
-        doc = PNML_DOC.replace(
+        doc = VALID_NET.replace(
             "<pnml>",
             '<pnml xmlns="http://www.pnml.org/version-2009/grammar/pnml">',
         )
@@ -149,6 +157,92 @@ class TestPnmlValidatorLevel1(unittest.TestCase):
             ),
             "must be an integer",
         )
+
+
+class TestPnmlValidatorLevel2(unittest.TestCase):
+    def assert_issue(self, pnml, fragment):
+        issues = PnmlValidator().validate_pnml(pnml)
+        self.assertTrue(
+            any(fragment in issue for issue in issues),
+            f"expected an issue containing {fragment!r}, got: {issues}",
+        )
+
+    def test_unresolved_arc_reference(self):
+        self.assert_issue(
+            _net(MARKED_START + '<arc id="a1" source="p1" target="ghost"/>'),
+            "references unknown target 'ghost'",
+        )
+
+    def test_self_loop(self):
+        self.assert_issue(
+            _net(MARKED_START + '<arc id="a1" source="p1" target="p1"/>'),
+            "connects 'p1' to itself",
+        )
+
+    def test_bipartiteness(self):
+        doc = _net(
+            MARKED_START + '<place id="p2"/><transition id="t1"/>'
+            '<arc id="a1" source="p1" target="p2"/>'
+            '<arc id="a2" source="p2" target="t1"/>'
+            '<arc id="a3" source="t1" target="p2"/>'
+        )
+        self.assert_issue(doc, "place 'p1' to place 'p2'")
+
+    def test_exactly_one_source_and_sink(self):
+        two_sources = _net(
+            MARKED_START + '<place id="p2"/><transition id="t1"/><place id="p3"/>'
+            '<arc id="a1" source="p1" target="t1"/>'
+            '<arc id="a2" source="p2" target="t1"/>'
+            '<arc id="a3" source="t1" target="p3"/>'
+        )
+        self.assert_issue(two_sources, "exactly one start place")
+
+    def test_marking_is_required(self):
+        unmarked = _net(
+            '<place id="p1"/><transition id="t1"/><place id="p2"/>'
+            '<arc id="a1" source="p1" target="t1"/>'
+            '<arc id="a2" source="t1" target="p2"/>'
+        )
+        self.assert_issue(
+            unmarked, "exactly one place with an initialMarking >= 1"
+        )
+
+    def test_marking_must_be_exactly_one_token(self):
+        doc = VALID_NET.replace(
+            "<initialMarking><text>1</text></initialMarking>",
+            "<initialMarking><text>3</text></initialMarking>",
+        )
+        self.assert_issue(doc, "must be exactly 1, found 3")
+
+    def test_marking_must_sit_on_the_source(self):
+        doc = _net(
+            '<place id="p1"/><transition id="t1"/>'
+            '<place id="p2"><initialMarking><text>1</text></initialMarking></place>'
+            '<arc id="a1" source="p1" target="t1"/>'
+            '<arc id="a2" source="t1" target="p2"/>'
+        )
+        self.assert_issue(doc, "not the structural start place")
+
+    def test_transition_connectivity(self):
+        doc = _net(
+            MARKED_START + '<transition id="t1"/><place id="p2"/>'
+            '<transition id="t2"/>'
+            '<arc id="a1" source="p1" target="t1"/>'
+            '<arc id="a2" source="t1" target="p2"/>'
+        )
+        self.assert_issue(doc, "'t2' has no inbound arc")
+        self.assert_issue(doc, "'t2' has no outbound arc")
+
+    def test_stranded_nodes_are_reported(self):
+        doc = _net(
+            MARKED_START + '<transition id="t1"/><place id="p2"/>'
+            '<transition id="t2"/><place id="p3"/>'
+            '<arc id="a1" source="p1" target="t1"/>'
+            '<arc id="a2" source="t1" target="p2"/>'
+            '<arc id="a3" source="p3" target="t2"/>'
+            '<arc id="a4" source="t2" target="p3"/>'
+        )
+        self.assert_issue(doc, "'t2' lies on no path")
 
 
 class TestGeneratePnmlRoute(unittest.TestCase):
