@@ -6,12 +6,18 @@ from app.services.llm_service import EmptyResponseError, LLMService
 from app.services.pnml_validator import PnmlValidator
 from config import TestingConfig
 
+PT_NET_TYPE = "http://www.informatik.hu-berlin.de/top/pntd/ptNetb"
+
 PNML_DOC = (
-    '<pnml><net type="x" id="noID">'
+    f'<pnml><net type="{PT_NET_TYPE}" id="noID">'
     '<place id="p1"/><transition id="t1"/>'
     '<arc id="a1" source="p1" target="t1"/>'
     "</net></pnml>"
 )
+
+
+def _net(inner, net_type=PT_NET_TYPE):
+    return f'<pnml><net id="noID" type="{net_type}">{inner}</net></pnml>'
 
 
 class TestPnmlExtraction(unittest.TestCase):
@@ -55,6 +61,94 @@ class TestPnmlValidatorLevel0(unittest.TestCase):
         self.assertIn("ship the order", prompt)
         self.assertIn(PNML_DOC, prompt)
         self.assertIn("arc a1 connects two places", prompt)
+
+
+class TestPnmlValidatorLevel1(unittest.TestCase):
+    def assert_issue(self, pnml, fragment):
+        issues = PnmlValidator().validate_pnml(pnml)
+        self.assertTrue(
+            any(fragment in issue for issue in issues),
+            f"expected an issue containing {fragment!r}, got: {issues}",
+        )
+
+    def test_contract_example_passes(self):
+        doc = _net(
+            '<place id="p1"><name><text>start</text></name>'
+            "<initialMarking><text>1</text></initialMarking></place>"
+            '<transition id="t1"><name><text>check order</text></name></transition>'
+            '<place id="p2"><name><text>end</text></name></place>'
+            '<arc id="a1" source="p1" target="t1"/>'
+            '<arc id="a2" source="t1" target="p2"/>'
+        )
+        self.assertEqual(PnmlValidator().validate_pnml(doc), [])
+
+    def test_namespaced_document_is_tolerated(self):
+        doc = PNML_DOC.replace(
+            "<pnml>",
+            '<pnml xmlns="http://www.pnml.org/version-2009/grammar/pnml">',
+        )
+        self.assertEqual(PnmlValidator().validate_pnml(doc), [])
+
+    def test_wrong_root_element(self):
+        self.assert_issue("<foo/>", "root element must be <pnml>")
+
+    def test_exactly_one_net(self):
+        self.assert_issue("<pnml/>", "exactly one <net>")
+        self.assert_issue("<pnml><net/><net/></pnml>", "exactly one <net>")
+
+    def test_net_requires_id_and_ptnetb_type(self):
+        self.assert_issue(
+            f'<pnml><net type="{PT_NET_TYPE}"><place id="p1"/></net></pnml>',
+            "missing its 'id'",
+        )
+        self.assert_issue(_net('<place id="p1"/>', net_type="x"), "type must be")
+
+    def test_forbidden_elements_are_reported(self):
+        self.assert_issue(
+            _net('<place id="p1"><graphics/></place>'),
+            "forbidden element <graphics>",
+        )
+        self.assert_issue(
+            _net('<transition id="t1"><toolspecific tool="WoPeD"/></transition>'),
+            "forbidden element <toolspecific>",
+        )
+
+    def test_unexpected_net_child_is_reported(self):
+        self.assert_issue(
+            _net('<name><text>my net</text></name><place id="p1"/>'),
+            "unexpected element <name> under <net>",
+        )
+
+    def test_ids_required_and_unique(self):
+        self.assert_issue(_net("<place/>"), "<place> without 'id'")
+        self.assert_issue(
+            _net('<place id="x"/><transition id="x"/>'), "duplicate id 'x'"
+        )
+
+    def test_arc_requires_source_and_target(self):
+        self.assert_issue(_net('<arc id="a1" source="p1"/>'), "missing its 'source' or 'target'")
+
+    def test_empty_name_text_is_reported(self):
+        self.assert_issue(
+            _net('<place id="p1"><name/></place>'),
+            "must contain a non-empty <text>",
+        )
+
+    def test_initial_marking_value_sanity(self):
+        self.assert_issue(
+            _net(
+                '<place id="p1"><initialMarking><text>-1</text>'
+                "</initialMarking></place>"
+            ),
+            "must be >= 0",
+        )
+        self.assert_issue(
+            _net(
+                '<place id="p1"><initialMarking><text>one</text>'
+                "</initialMarking></place>"
+            ),
+            "must be an integer",
+        )
 
 
 class TestGeneratePnmlRoute(unittest.TestCase):
