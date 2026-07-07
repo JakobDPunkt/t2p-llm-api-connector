@@ -1,14 +1,16 @@
 """Experimental direct text-to-PNML endpoint, parallel to ``/generate``.
 
 The standard path returns BPMN JSON that t2p-2.0 feeds through the
-model-transformer; this endpoint lets the LLM emit PNML directly and passes
-it through. Auth, payload validation, error mapping and metrics reuse the
-``/generate`` machinery unchanged.
+model-transformer; this endpoint lets the LLM emit PNML directly. Auth,
+payload validation, error mapping and metrics reuse the ``/generate``
+machinery unchanged.
 
-TODO(pnml-demo): the response contract is provisional (raw PNML as
-application/xml). The final contract must stay compatible with what the
-standard pipeline does after the model-transformer (coordinate assignment
-in t2p-2.0 etc.).
+Response contract: the body is one pure, geometry-free PNML document
+(application/xml) — structurally equivalent to the model-transformer's
+output, so downstream post-processing (coordinate assignment in t2p-2.0)
+keeps working. Validation issues remaining after the correction loop do
+not block delivery (best effort); they are reported in the CORS-exposed
+``X-Validation-Issues`` response header.
 """
 
 import logging
