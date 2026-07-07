@@ -142,23 +142,6 @@ class TestPnmlValidatorLevel1(unittest.TestCase):
             "must contain a non-empty <text>",
         )
 
-    def test_initial_marking_value_sanity(self):
-        self.assert_issue(
-            _net(
-                '<place id="p1"><initialMarking><text>-1</text>'
-                "</initialMarking></place>"
-            ),
-            "must be >= 0",
-        )
-        self.assert_issue(
-            _net(
-                '<place id="p1"><initialMarking><text>one</text>'
-                "</initialMarking></place>"
-            ),
-            "must be an integer",
-        )
-
-
 class TestPnmlValidatorLevel2(unittest.TestCase):
     def assert_issue(self, pnml, fragment):
         issues = PnmlValidator().validate_pnml(pnml)
@@ -204,15 +187,16 @@ class TestPnmlValidatorLevel2(unittest.TestCase):
             '<arc id="a2" source="t1" target="p2"/>'
         )
         self.assert_issue(
-            unmarked, "exactly one place with an initialMarking >= 1"
+            unmarked, "exactly one place with an <initialMarking>, found 0"
         )
 
     def test_marking_must_be_exactly_one_token(self):
-        doc = VALID_NET.replace(
-            "<initialMarking><text>1</text></initialMarking>",
-            "<initialMarking><text>3</text></initialMarking>",
-        )
-        self.assert_issue(doc, "must be exactly 1, found 3")
+        for bad_value in ("3", "-1", "one"):
+            doc = VALID_NET.replace(
+                "<initialMarking><text>1</text></initialMarking>",
+                f"<initialMarking><text>{bad_value}</text></initialMarking>",
+            )
+            self.assert_issue(doc, f"must be exactly 1, found '{bad_value}'")
 
     def test_marking_must_sit_on_the_source(self):
         doc = _net(
@@ -232,6 +216,14 @@ class TestPnmlValidatorLevel2(unittest.TestCase):
         )
         self.assert_issue(doc, "'t2' has no inbound arc")
         self.assert_issue(doc, "'t2' has no outbound arc")
+
+    def test_duplicate_parallel_arcs_are_reported(self):
+        doc = VALID_NET.replace(
+            '<arc id="a2" source="t1" target="p2"/>',
+            '<arc id="a2" source="t1" target="p2"/>'
+            '<arc id="a3" source="t1" target="p2"/>',
+        )
+        self.assert_issue(doc, "duplicate arc from 't1' to 'p2'")
 
     def test_stranded_nodes_are_reported(self):
         doc = _net(

@@ -154,22 +154,6 @@ class PnmlValidator:
                         "non-empty <text>"
                     )
 
-        for place in _iter_local(net, "place"):
-            place_id = place.get("id") or "<no id>"
-            marking_text = _child_text(place, "initialMarking")
-            if marking_text is None:
-                continue
-            try:
-                if int(marking_text) < 0:
-                    issues.append(
-                        f"initialMarking of place '{place_id}' must be >= 0"
-                    )
-            except ValueError:
-                issues.append(
-                    f"initialMarking of place '{place_id}' must be an integer, "
-                    f"found '{marking_text}'"
-                )
-
         return issues
 
     # --- Level 2 -----------------------------------------------------------
@@ -190,6 +174,7 @@ class PnmlValidator:
         edges = []
         incoming = {}
         outgoing = {}
+        seen_connections = set()
         for arc in _iter_local(root, "arc"):
             arc_id = arc.get("id")
             source = arc.get("source")
@@ -221,6 +206,15 @@ class PnmlValidator:
                     "transition)"
                 )
 
+            # Duplicate parallel arcs: a typical LLM repetition pattern, and
+            # downstream a second identical arc reads as an arc weight of 2.
+            if (source, target) in seen_connections:
+                issues.append(
+                    f"duplicate arc from '{source}' to '{target}' (arc "
+                    f"'{arc_id}'); only one arc per direction is allowed"
+                )
+            seen_connections.add((source, target))
+
             edges.append((source, target))
             outgoing.setdefault(source, set()).add(target)
             incoming.setdefault(target, set()).add(source)
@@ -243,29 +237,25 @@ class PnmlValidator:
                 f"found {len(sinks)} ({', '.join(sinks) or 'none'})"
             )
 
-        marked = {}
-        for place in _iter_local(root, "place"):
-            marking_text = _child_text(place, "initialMarking")
-            if marking_text is None:
-                continue
-            try:
-                marking = int(marking_text)
-            except ValueError:
-                continue  # value errors are reported by level 1
-            if marking >= 1:
-                marked[place.get("id")] = marking
-
+        # The single marking rule: exactly one place carries <initialMarking>,
+        # its value is exactly one token, and it is the structural start
+        # place. One start implies one marking, so the whole rule lives here.
+        marked = {
+            place.get("id"): _child_text(place, "initialMarking")
+            for place in _iter_local(root, "place")
+            if _child_text(place, "initialMarking") is not None
+        }
         if len(marked) != 1:
             issues.append(
-                "expected exactly one place with an initialMarking >= 1, "
+                "expected exactly one place with an <initialMarking>, "
                 f"found {len(marked)}"
             )
         else:
-            (marked_id, marking), = marked.items()
-            if marking != 1:
+            (marked_id, marking_text), = marked.items()
+            if marking_text != "1":
                 issues.append(
                     f"initialMarking of start place '{marked_id}' must be "
-                    f"exactly 1, found {marking}"
+                    f"exactly 1, found '{marking_text}'"
                 )
             if incoming.get(marked_id):
                 issues.append(
