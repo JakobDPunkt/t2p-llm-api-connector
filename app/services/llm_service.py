@@ -658,6 +658,11 @@ class LLMService:
         Parallel to ``generate``: same provider dispatch, but one bare provider
         call with the PNML system prompt and the raw user text — no
         PromptBuilder, no few-shot orchestration, no JSON handling.
+
+        Returns a ``(pnml, issues)`` tuple: the (best-effort) PNML document and
+        the list of validation issues remaining after correction. Per contract
+        the document is delivered even with remaining issues; the route exposes
+        them in the ``X-Validation-Issues`` response header.
         """
         method_name = model_registry.dispatch_method(provider)
         if method_name == "call_openai":
@@ -689,7 +694,7 @@ class LLMService:
         # Decided design: single LLM call, no heuristic sanitize step, no
         # temperature escalation. Structural validation with LLM correction
         # follows; until its design is settled the validator is a stub and
-        # issues are only logged.
+        # issues are only logged and reported to the caller.
         issues = self.pnml_validator.validate_pnml(pnml, user_text)
         if issues:
             # TODO(pnml-demo): LLM correction pass to be designed with Jakob
@@ -699,4 +704,4 @@ class LLMService:
                 len(issues),
                 "; ".join(issues),
             )
-        return pnml
+        return pnml, issues

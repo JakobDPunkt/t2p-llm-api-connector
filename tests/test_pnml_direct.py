@@ -68,16 +68,35 @@ class TestGeneratePnmlRoute(unittest.TestCase):
 
     @patch("app.api.pnml_routes.model_registry.refresh_model_cache")
     @patch("app.api.routes.model_registry.is_valid", return_value=True)
-    @patch("app.api.pnml_routes._llm_service.generate_pnml", return_value=PNML_DOC)
+    @patch(
+        "app.api.pnml_routes._llm_service.generate_pnml",
+        return_value=(PNML_DOC, []),
+    )
     def test_valid_request_returns_pnml_as_xml(self, mock_generate, _valid, _refresh):
         response = self._post()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.mimetype, "application/xml")
         self.assertIn(b"<pnml>", response.data)
+        self.assertNotIn("X-Validation-Issues", response.headers)
         mock_generate.assert_called_once()
         self.assertEqual(
             mock_generate.call_args.kwargs["system_prompt"],
             self.app.config["PNML_SYSTEM_PROMPT"],
+        )
+
+    @patch("app.api.pnml_routes.model_registry.refresh_model_cache")
+    @patch("app.api.routes.model_registry.is_valid", return_value=True)
+    @patch(
+        "app.api.pnml_routes._llm_service.generate_pnml",
+        return_value=(PNML_DOC, ["transition 't9' has no inbound arc"]),
+    )
+    def test_remaining_issues_are_reported_in_header(self, _gen, _valid, _refresh):
+        response = self._post()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"<pnml>", response.data)
+        self.assertEqual(
+            response.headers["X-Validation-Issues"],
+            "transition 't9' has no inbound arc",
         )
 
     def test_missing_auth_returns_401(self):

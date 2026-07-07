@@ -35,7 +35,9 @@ logger = logging.getLogger(__name__)
 
 
 @bp.route("/generate_pnml", methods=["POST"])
-@cross_origin()  # browser demo clients call this endpoint directly
+# Browser demo clients call this endpoint directly; expose the issues header
+# so cross-origin JavaScript may read it.
+@cross_origin(expose_headers=["X-Validation-Issues"])
 @swag_from(
     {
         "tags": ["pnml-direct-experiment"],
@@ -101,14 +103,19 @@ def generate_pnml():
             provider,
             model,
         )
-        pnml = _llm_service.generate_pnml(
+        pnml, issues = _llm_service.generate_pnml(
             api_key=api_key,
             provider=provider,
             model=model,
             user_text=data["user_text"],
             system_prompt=current_app.config["PNML_SYSTEM_PROMPT"],
         )
-        return Response(pnml, status=200, mimetype="application/xml")
+        response = Response(pnml, status=200, mimetype="application/xml")
+        if issues:
+            # Best-effort delivery per contract: the body stays pure PNML,
+            # remaining validation issues travel in the header.
+            response.headers["X-Validation-Issues"] = "; ".join(issues)
+        return response
 
     except Exception as e:
         if isinstance(e, EmptyResponseError):
