@@ -33,18 +33,18 @@ STYLE:
 
 EXAMPLES (they illustrate the mapping; always model the actual description):
 
-Description: "A customer places an order. The order is checked. If it is valid it is shipped, otherwise it is corrected and checked again."
+Description: "A customer reports an issue. The issue is analyzed. If a solution is found it is resolved, otherwise it is escalated and analyzed again."
 Answer:
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
 <place id="p1"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
-<transition id="t1"><name><text>place order</text></name></transition>
+<transition id="t1"><name><text>report issue</text></name></transition>
 <place id="p2"/>
-<transition id="t2"><name><text>check order</text></name></transition>
+<transition id="t2"><name><text>analyze issue</text></name></transition>
 <place id="p3"/>
-<transition id="t3"><name><text>ship order</text></name></transition>
-<transition id="t4"><name><text>correct order</text></name></transition>
+<transition id="t3"><name><text>resolve issue</text></name></transition>
+<transition id="t4"><name><text>escalate issue</text></name></transition>
 <place id="p4"><name><text>end</text></name></place>
 <arc id="a1" source="p1" target="t1"/>
 <arc id="a2" source="t1" target="p2"/>
@@ -57,21 +57,24 @@ Answer:
 </net>
 </pnml>
 
-Description: "After the order is received, the goods are packed and the invoice is prepared in parallel. Finally the parcel is shipped."
+Description: "Ein Mitarbeiter reicht einen Urlaubsantrag ein. Die Personalabteilung prüft den Antrag, während gleichzeitig das Zeitkonto aktualisiert wird. Danach wird das Ergebnis dokumentiert. Bei Genehmigung erhält der Mitarbeiter eine Bestätigung, andernfalls eine Ablehnung."
 Answer:
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
 <place id="p1"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
-<transition id="t1"><name><text>receive order</text></name></transition>
+<transition id="t1"><name><text>urlaubsantrag einreichen</text></name></transition>
 <place id="p2"/>
 <place id="p3"/>
-<transition id="t2"><name><text>pack goods</text></name></transition>
-<transition id="t3"><name><text>prepare invoice</text></name></transition>
+<transition id="t2"><name><text>antrag prüfen</text></name></transition>
+<transition id="t3"><name><text>zeitkonto aktualisieren</text></name></transition>
 <place id="p4"/>
 <place id="p5"/>
-<transition id="t4"><name><text>ship parcel</text></name></transition>
-<place id="p6"><name><text>end</text></name></place>
+<transition id="t4"><name><text>ergebnis dokumentieren</text></name></transition>
+<place id="p6"/>
+<transition id="t5"><name><text>bestätigung senden</text></name></transition>
+<transition id="t6"><name><text>ablehnung senden</text></name></transition>
+<place id="p7"><name><text>end</text></name></place>
 <arc id="a1" source="p1" target="t1"/>
 <arc id="a2" source="t1" target="p2"/>
 <arc id="a3" source="t1" target="p3"/>
@@ -82,6 +85,10 @@ Answer:
 <arc id="a8" source="p4" target="t4"/>
 <arc id="a9" source="p5" target="t4"/>
 <arc id="a10" source="t4" target="p6"/>
+<arc id="a11" source="p6" target="t5"/>
+<arc id="a12" source="p6" target="t6"/>
+<arc id="a13" source="t5" target="p7"/>
+<arc id="a14" source="t6" target="p7"/>
 </net>
 </pnml>
 
