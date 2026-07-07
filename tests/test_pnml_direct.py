@@ -33,10 +33,20 @@ class TestPnmlExtraction(unittest.TestCase):
         self.assertIsNone(LLMService._extract_pnml_document(None))
 
 
-class TestPnmlValidatorStub(unittest.TestCase):
-    def test_validate_stub_reports_no_issues(self):
-        # TODO(pnml-demo): replace once real checks are implemented.
+class TestPnmlValidatorLevel0(unittest.TestCase):
+    def test_valid_xml_passes(self):
         self.assertEqual(PnmlValidator().validate_pnml(PNML_DOC), [])
+
+    def test_truncated_xml_is_reported(self):
+        issues = PnmlValidator().validate_pnml("<pnml><net id='n1'>")
+        self.assertEqual(len(issues), 1)
+        self.assertIn("not valid XML", issues[0])
+
+    def test_empty_output_is_reported(self):
+        for bad in ("", "   ", None):
+            issues = PnmlValidator().validate_pnml(bad)
+            self.assertEqual(len(issues), 1)
+            self.assertIn("not valid XML", issues[0])
 
     def test_repair_prompt_embeds_context(self):
         prompt = LLMService()._build_pnml_repair_prompt(
