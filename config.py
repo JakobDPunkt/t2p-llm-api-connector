@@ -2,19 +2,18 @@ import os
 from pathlib import Path
 
 
-def _load_system_prompt_from_txt():
-    """Load system prompt text from the zero-shot prompt template file."""
-    prompt_file = (
-        Path(__file__).parent
-        / "app"
-        / "utils"
-        / "zero-shot-prompts"
-        / "00_zero_shot_prompt.txt"
-    )
+def _load_prompt_from_txt(prompt_dir, file_name):
+    """Load a system prompt text from a prompt template file under app/utils."""
+    prompt_file = Path(__file__).parent / "app" / "utils" / prompt_dir / file_name
     try:
         return prompt_file.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def _load_system_prompt_from_txt():
+    """Load system prompt text from the zero-shot prompt template file."""
+    return _load_prompt_from_txt("zero-shot-prompts", "00_zero_shot_prompt.txt")
 
 
 def _env_bool(name, default=False):
@@ -28,6 +27,10 @@ def _env_bool(name, default=False):
 # === Base Configuration ===
 class BaseConfig:
     SYSTEM_PROMPT = _load_system_prompt_from_txt()
+    # System prompt for the experimental direct text-to-PNML endpoint.
+    PNML_SYSTEM_PROMPT = _load_prompt_from_txt(
+        "pnml-prompts", "00_pnml_system_prompt.txt"
+    )
     # Optional provider hosts/base URLs (useful for proxies, gateways, or
     # enterprise endpoints).
     OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_HOST")
