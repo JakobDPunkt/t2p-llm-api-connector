@@ -24,6 +24,8 @@ Follow this structure:
 </pnml>
 
 Rules:
+- Do not include any <graphics> elements, coordinates or dimensions — layouting
+  happens downstream, exactly as after the classic model-transformer.
 - Arcs only connect a place to a transition or a transition to a place.
 - Exactly one start place (carries the initial marking), exactly one end place.
 - Each activity in the description becomes one transition.

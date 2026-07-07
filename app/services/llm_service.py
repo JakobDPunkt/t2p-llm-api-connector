@@ -6,7 +6,7 @@ import google.generativeai as genai
 from flask import current_app
 from openai import OpenAI
 
-from app.services import model_registry
+from app.services import model_registry, pnml_postprocessor
 from app.services.model_validator import ModelValidator
 from app.utils.prompt_builder import PromptBuilder, STRICT_JSON_REMINDER
 
@@ -607,3 +607,50 @@ class LLMService:
             prompting_strategy=prompting_strategy,
             model=model,
         )
+
+    def generate_pnml(self, api_key, provider, model, user_text, system_prompt):
+        """Experimental direct text-to-PNML entry point for ``/generate_pnml``.
+
+        Parallel to ``generate``: same provider dispatch, but one bare provider
+        call with the PNML system prompt and the raw user text — no
+        PromptBuilder, no few-shot orchestration, no JSON handling.
+        """
+        method_name = model_registry.dispatch_method(provider)
+        if method_name == "call_openai":
+            client_kwargs = {"api_key": api_key}
+            openai_base_url = self._config_value("OPENAI_BASE_URL")
+            if openai_base_url:
+                client_kwargs["base_url"] = openai_base_url
+            client = OpenAI(**client_kwargs)
+            raw_text = self._openai_generate_once(
+                client, system_prompt, model, user_text
+            )
+        elif method_name == "call_gemini":
+            genai_kwargs = {"api_key": api_key}
+            gemini_api_endpoint = self._config_value("GEMINI_API_ENDPOINT")
+            if gemini_api_endpoint:
+                genai_kwargs["client_options"] = {"api_endpoint": gemini_api_endpoint}
+            genai.configure(**genai_kwargs)
+            gen_model = genai.GenerativeModel(
+                model_name=model, system_instruction=system_prompt
+            )
+            raw_text = self._gemini_generate_once(gen_model, user_text)
+        else:
+            raise ValueError(f"Unsupported provider: {provider}")
+
+        pnml = pnml_postprocessor.extract_pnml(raw_text)
+        if pnml is None:
+            raise EmptyResponseError("Provider reply contained no PNML document.")
+
+        issues = pnml_postprocessor.validate_pnml(pnml)
+        if issues:
+            # TODO(pnml-demo): run a bounded repair pass here via
+            # pnml_postprocessor.build_repair_prompt (the standard few-shot
+            # path runs exactly one). Until the retry policy is decided,
+            # issues are only logged and the PNML is returned as-is.
+            logger.warning(
+                "PNML validation found %d issue(s): %s",
+                len(issues),
+                "; ".join(issues),
+            )
+        return pnml
