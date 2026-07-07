@@ -34,10 +34,6 @@ class TestPnmlExtraction(unittest.TestCase):
 
 
 class TestPnmlValidatorStub(unittest.TestCase):
-    def test_sanitize_stub_passes_document_through(self):
-        # TODO(pnml-demo): replace once real repair heuristics exist.
-        self.assertEqual(PnmlValidator().sanitize_pnml(PNML_DOC), PNML_DOC)
-
     def test_validate_stub_reports_no_issues(self):
         # TODO(pnml-demo): replace once real checks are implemented.
         self.assertEqual(PnmlValidator().validate_pnml(PNML_DOC), [])

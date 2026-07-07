@@ -686,14 +686,14 @@ class LLMService:
         if pnml is None:
             raise EmptyResponseError("Provider reply contained no PNML document.")
 
-        # Same position as on the few-shot path: sanitize, then validate.
-        pnml = self.pnml_validator.sanitize_pnml(pnml)
+        # Decided design: single LLM call, no heuristic sanitize step, no
+        # temperature escalation. Structural validation with LLM correction
+        # follows; until its design is settled the validator is a stub and
+        # issues are only logged.
         issues = self.pnml_validator.validate_pnml(pnml, user_text)
         if issues:
-            # TODO(pnml-demo): run one repair pass here via
-            # _build_pnml_repair_prompt (mirrors the few-shot path); the
-            # behaviour for issues remaining after repair is decided with
-            # Jakob. Until then issues are only logged.
+            # TODO(pnml-demo): LLM correction pass to be designed with Jakob
+            # (which checks, and how the correction prompt is built).
             logger.warning(
                 "PNML validation found %d issue(s): %s",
                 len(issues),
