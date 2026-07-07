@@ -205,7 +205,7 @@ class TestPnmlValidatorLevel2(unittest.TestCase):
             '<arc id="a1" source="p1" target="t1"/>'
             '<arc id="a2" source="t1" target="p2"/>'
         )
-        self.assert_issue(doc, "not the structural start place")
+        self.assert_issue(doc, "the marking must sit on the start place")
 
     def test_transition_connectivity(self):
         doc = _net(
@@ -214,8 +214,8 @@ class TestPnmlValidatorLevel2(unittest.TestCase):
             '<arc id="a1" source="p1" target="t1"/>'
             '<arc id="a2" source="t1" target="p2"/>'
         )
-        self.assert_issue(doc, "'t2' has no inbound arc")
-        self.assert_issue(doc, "'t2' has no outbound arc")
+        self.assert_issue(doc, "'t2' has no incoming arc")
+        self.assert_issue(doc, "'t2' has no outgoing arc")
 
     def test_duplicate_parallel_arcs_are_reported(self):
         doc = VALID_NET.replace(
@@ -235,6 +235,106 @@ class TestPnmlValidatorLevel2(unittest.TestCase):
             '<arc id="a4" source="t2" target="p3"/>'
         )
         self.assert_issue(doc, "'t2' lies on no path")
+
+    def test_local_and_graph_issues_are_reported_together(self):
+        # A forbidden element must not hide graph findings (and vice versa).
+        doc = VALID_NET.replace(
+            '<transition id="t1">',
+            '<transition id="t1"><graphics/>',
+        ).replace(
+            "<initialMarking><text>1</text></initialMarking>", ""
+        )
+        issues = PnmlValidator().validate_pnml(doc)
+        self.assertTrue(any("forbidden element <graphics>" in i for i in issues))
+        self.assertTrue(any("<initialMarking>" in i for i in issues))
+
+    def test_graph_prerequisites_gate_level_2(self):
+        # A duplicate id makes the graph ill-defined; level-2 findings would
+        # be artifacts and must be suppressed.
+        doc = _net(
+            '<place id="x"/><transition id="x"/>'
+            '<arc id="a1" source="x" target="x"/>'
+        )
+        issues = PnmlValidator().validate_pnml(doc)
+        self.assertTrue(any("duplicate id 'x'" in i for i in issues))
+        self.assertFalse(any("itself" in i for i in issues))
+
+
+def _with_duplicate_arc(arc_id):
+    """VALID_NET plus one duplicate t1->p2 arc; exactly one level-2 issue."""
+    return VALID_NET.replace(
+        '<arc id="a2" source="t1" target="p2"/>',
+        '<arc id="a2" source="t1" target="p2"/>'
+        f'<arc id="{arc_id}" source="t1" target="p2"/>',
+    )
+
+
+class TestPnmlCorrectionLoop(unittest.TestCase):
+    """The generate -> validate -> correct loop with a mocked provider."""
+
+    def setUp(self):
+        self.app = create_app(TestingConfig)
+        self.app_context = self.app.app_context()
+        self.app_context.push()
+        self.service = LLMService()
+
+    def tearDown(self):
+        self.app_context.pop()
+
+    def _generate(self, mock_once):
+        with patch.object(
+            LLMService, "_openai_generate_once", side_effect=mock_once
+        ) as mocked:
+            pnml, issues = self.service.generate_pnml(
+                api_key="test-key",
+                provider="openai",
+                model="gpt-4o",
+                user_text="ship the order",
+                system_prompt="prompt under test",
+            )
+        return pnml, issues, mocked
+
+    def test_valid_first_attempt_needs_no_correction(self):
+        pnml, issues, mocked = self._generate([VALID_NET])
+        self.assertEqual(issues, [])
+        self.assertEqual(mocked.call_count, 1)
+
+    def test_correction_fixes_the_document(self):
+        pnml, issues, mocked = self._generate(
+            [_with_duplicate_arc("a3"), VALID_NET]
+        )
+        self.assertEqual(issues, [])
+        self.assertEqual(mocked.call_count, 2)
+        # The correction prompt carries the previous document and the issue.
+        correction_prompt = mocked.call_args_list[1].args[3]
+        self.assertIn("duplicate arc", correction_prompt)
+        self.assertIn("<pnml>", correction_prompt)
+
+    def test_identical_issues_stop_the_loop(self):
+        broken = _with_duplicate_arc("a3")
+        pnml, issues, mocked = self._generate([broken, broken, broken])
+        # Initial call plus one correction; the identical result stops it.
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(len(issues), 1)
+
+    def test_budget_is_one_generation_plus_three_corrections(self):
+        replies = [
+            _with_duplicate_arc("a3"),
+            _with_duplicate_arc("a4"),
+            _with_duplicate_arc("a5"),
+            _with_duplicate_arc("a6"),
+            _with_duplicate_arc("a7"),
+        ]
+        pnml, issues, mocked = self._generate(replies)
+        self.assertEqual(mocked.call_count, 4)
+        self.assertEqual(len(issues), 1)
+
+    def test_correction_without_pnml_keeps_previous_attempt(self):
+        broken = _with_duplicate_arc("a3")
+        pnml, issues, mocked = self._generate([broken, "no xml in here"])
+        self.assertEqual(mocked.call_count, 2)
+        self.assertIn(broken, pnml)
+        self.assertEqual(len(issues), 1)
 
 
 class TestGeneratePnmlRoute(unittest.TestCase):

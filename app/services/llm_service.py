@@ -14,6 +14,11 @@ from app.utils.prompt_builder import PromptBuilder, STRICT_JSON_REMINDER
 
 _PNML_BLOCK_RE = re.compile(r"<pnml\b.*?</pnml>", re.DOTALL | re.IGNORECASE)
 
+# Correction budget for the direct-PNML path: one generation plus up to
+# three correction passes (all at temperature 0; the prompt changes between
+# passes because it carries the previous document and its issues).
+_PNML_MAX_CORRECTIONS = 3
+
 logger = logging.getLogger(__name__)
 
 
@@ -108,24 +113,29 @@ class LLMService:
         )
 
     def _build_pnml_repair_prompt(self, user_text, pnml_xml, issues):
-        """Create a repair prompt from PNML validation findings.
+        """Create a correction prompt from PNML validation findings.
 
         Counterpart of ``_build_repair_prompt`` for the direct-PNML path.
-        TODO(pnml-demo): wording is a placeholder; the repair prompt is
-        engineered together with the system prompt once live data exists.
+        The prompt anchors the correction in the original process text (so
+        the model does not drift away from the described process just to
+        satisfy the validator) and demands a minimal change (so correct
+        parts survive the correction).
         """
         issues_block = "\n".join(f"- {issue}" for issue in issues)
         return (
-            "You are repairing a PNML document to satisfy strict structural "
-            "rules.\n"
+            "Your previous PNML document for the process description below "
+            "violates structural rules.\n"
+            "Produce a corrected version of THIS document. Change as little "
+            "as possible: fix exactly the listed issues and keep all correct "
+            "parts (ids, names, structure) unchanged. The corrected document "
+            "must still model the described process.\n"
             "Return exactly one well-formed PNML XML document and nothing "
             "else.\n\n"
-            "Preserve ids where possible, but fix broken structure.\n\n"
-            "Process text:\n"
+            "Process description:\n"
             f"{user_text}\n\n"
             "Validation issues to fix:\n"
             f"{issues_block}\n\n"
-            "Current PNML:\n"
+            "Your previous PNML:\n"
             f"{pnml_xml}\n"
         )
 
@@ -671,9 +681,12 @@ class LLMService:
             if openai_base_url:
                 client_kwargs["base_url"] = openai_base_url
             client = OpenAI(**client_kwargs)
-            raw_text = self._openai_generate_once(
-                client, system_prompt, model, user_text
-            )
+
+            def generate_once(prompt):
+                return self._openai_generate_once(
+                    client, system_prompt, model, prompt
+                )
+
         elif method_name == "call_gemini":
             genai_kwargs = {"api_key": api_key}
             gemini_api_endpoint = self._config_value("GEMINI_API_ENDPOINT")
@@ -683,25 +696,65 @@ class LLMService:
             gen_model = genai.GenerativeModel(
                 model_name=model, system_instruction=system_prompt
             )
-            raw_text = self._gemini_generate_once(gen_model, user_text)
+
+            def generate_once(prompt):
+                return self._gemini_generate_once(gen_model, prompt)
+
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
-        pnml = self._extract_pnml_document(raw_text)
+        pnml = self._extract_pnml_document(generate_once(user_text))
         if pnml is None:
             raise EmptyResponseError("Provider reply contained no PNML document.")
-
-        # Decided design: single LLM call, no heuristic sanitize step, no
-        # temperature escalation. Structural validation with LLM correction
-        # follows; until its design is settled the validator is a stub and
-        # issues are only logged and reported to the caller.
         issues = self.pnml_validator.validate_pnml(pnml, user_text)
-        if issues:
-            # TODO(pnml-demo): LLM correction pass to be designed with Jakob
-            # (which checks, and how the correction prompt is built).
-            logger.warning(
-                "PNML validation found %d issue(s): %s",
+
+        # Correction loop: up to _PNML_MAX_CORRECTIONS passes, each carrying
+        # the previous document plus the combined issue list. Stops early
+        # when a pass leaves the issues absolutely identical (no progress).
+        # The best attempt (fewest issues) is delivered per the best-effort
+        # contract; the route reports remaining issues in a response header.
+        best_pnml, best_issues = pnml, issues
+        previous_issues = None
+        corrections = 0
+        while issues and corrections < _PNML_MAX_CORRECTIONS:
+            if issues == previous_issues:
+                logger.warning(
+                    "PNML correction made no progress (identical issues); "
+                    "stopping after %d correction(s)",
+                    corrections,
+                )
+                break
+            previous_issues = issues
+
+            corrections += 1
+            logger.info(
+                "PNML correction attempt %d/%d for %d issue(s)",
+                corrections,
+                _PNML_MAX_CORRECTIONS,
                 len(issues),
-                "; ".join(issues),
             )
-        return pnml, issues
+            repair_prompt = self._build_pnml_repair_prompt(
+                user_text, pnml, issues
+            )
+            corrected = self._extract_pnml_document(generate_once(repair_prompt))
+            if corrected is None:
+                logger.warning(
+                    "PNML correction reply contained no PNML document; "
+                    "keeping the previous attempt"
+                )
+                break
+
+            pnml = corrected
+            issues = self.pnml_validator.validate_pnml(pnml, user_text)
+            if len(issues) < len(best_issues):
+                best_pnml, best_issues = pnml, issues
+
+        if best_issues:
+            logger.warning(
+                "PNML validation found %d remaining issue(s) after %d "
+                "correction(s): %s",
+                len(best_issues),
+                corrections,
+                "; ".join(best_issues),
+            )
+        return best_pnml, best_issues
