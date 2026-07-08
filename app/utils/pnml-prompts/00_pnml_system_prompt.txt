@@ -5,18 +5,18 @@ TARGET FORMAT, a complete minimal document:
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
-<place id="p1"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
-<transition id="t1"><name><text>check order</text></name></transition>
-<place id="p2"><name><text>end</text></name></place>
-<arc id="a1" source="p1" target="t1"/>
-<arc id="a2" source="t1" target="p2"/>
+<place id="p_start"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
+<transition id="t_check_order"><name><text>check order</text></name></transition>
+<place id="p_end"><name><text>end</text></name></place>
+<arc id="a1" source="p_start" target="t_check_order"/>
+<arc id="a2" source="t_check_order" target="p_end"/>
 </net>
 </pnml>
 
 STRUCTURE RULES:
 - The document contains exactly one <net> and only the element kinds shown above.
 - Arcs always connect one place and one transition, alternating between the two.
-- All ids are unique. Every arc references existing ids. At most one arc per direction between any two nodes.
+- Node ids say what the node is (p_analyzed, t_resolve_issue), so an arc referencing them is self-checking. All ids are unique. Every arc references existing ids. At most one arc per direction between any two nodes.
 - Exactly one start place: it has no incoming arcs and carries the single <initialMarking> with value 1. Exactly one end place: it has no outgoing arcs.
 - Every node lies on a path from the start place to the end place.
 
@@ -24,73 +24,121 @@ FROM TEXT TO NET:
 - Each activity in the description becomes one transition.
 - An exclusive choice (either/or) is a place with one outgoing arc per alternative; the alternatives merge back into a shared place.
 - Parallel work (simultaneously/meanwhile) is a transition with one outgoing arc per branch; the branches join through one transition.
-- A repetition (again/until) is an arc leading back to the place where the repeated part starts.
+- The arc counts alone carry these roles: a transition with exactly one incoming and one outgoing arc is a plain activity.
+- A split or join sits on the transition of the adjacent activity where the description has one; otherwise insert a transition without a <name>, which only routes the flow.
+- A repetition (again/until) is an arc from a transition back to the place where the repeated part starts.
 - Between two consecutive activities there is always a place. Model only what the description says.
 
+METHOD:
+Nothing in the finished XML says whether a branch point is a choice or parallel work — that follows only from whether the branching node is a place or a transition. So decide it before you write any arc.
+
+First list every branch point under the heading BRANCHES, one line each:
+- the cue from the description that justifies it,
+- whether it is an exclusive choice or parallel work,
+- the node that carries it, named by its id.
+Then write the document, following your own list.
+
 STYLE:
-- Transition labels are concise verb-object phrases in the language of the description. Intermediate places need no name.
-- Keep the output compact like the examples: one element per line, no indentation, no explanatory text.
+- Activity transitions carry a concise verb-object label in the language of the description. Routing transitions and intermediate places need no name.
+- Keep the XML compact like the examples: one element per line, no indentation, no prose between the elements.
 
 EXAMPLES (they illustrate the mapping; always model the actual description):
 
 Description: "A customer reports an issue. The issue is analyzed. If a solution is found it is resolved, otherwise it is escalated and analyzed again."
 Answer:
+BRANCHES:
+- "if a solution is found ... otherwise": exclusive choice on place p_analyzed, 2 outgoing arcs
+- "analyzed again": repetition, arc from t_escalate_issue back to p_reported
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
-<place id="p1"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
-<transition id="t1"><name><text>report issue</text></name></transition>
-<place id="p2"/>
-<transition id="t2"><name><text>analyze issue</text></name></transition>
-<place id="p3"/>
-<transition id="t3"><name><text>resolve issue</text></name></transition>
-<transition id="t4"><name><text>escalate issue</text></name></transition>
-<place id="p4"><name><text>end</text></name></place>
-<arc id="a1" source="p1" target="t1"/>
-<arc id="a2" source="t1" target="p2"/>
-<arc id="a3" source="p2" target="t2"/>
-<arc id="a4" source="t2" target="p3"/>
-<arc id="a5" source="p3" target="t3"/>
-<arc id="a6" source="p3" target="t4"/>
-<arc id="a7" source="t4" target="p2"/>
-<arc id="a8" source="t3" target="p4"/>
+<place id="p_start"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
+<transition id="t_report_issue"><name><text>report issue</text></name></transition>
+<place id="p_reported"/>
+<transition id="t_analyze_issue"><name><text>analyze issue</text></name></transition>
+<place id="p_analyzed"/>
+<transition id="t_resolve_issue"><name><text>resolve issue</text></name></transition>
+<transition id="t_escalate_issue"><name><text>escalate issue</text></name></transition>
+<place id="p_end"><name><text>end</text></name></place>
+<arc id="a1" source="p_start" target="t_report_issue"/>
+<arc id="a2" source="t_report_issue" target="p_reported"/>
+<arc id="a3" source="p_reported" target="t_analyze_issue"/>
+<arc id="a4" source="t_analyze_issue" target="p_analyzed"/>
+<arc id="a5" source="p_analyzed" target="t_resolve_issue"/>
+<arc id="a6" source="p_analyzed" target="t_escalate_issue"/>
+<arc id="a7" source="t_escalate_issue" target="p_reported"/>
+<arc id="a8" source="t_resolve_issue" target="p_end"/>
 </net>
 </pnml>
 
 Description: "Ein Mitarbeiter reicht einen Urlaubsantrag ein. Die Personalabteilung prüft den Antrag, während gleichzeitig das Zeitkonto aktualisiert wird. Danach wird das Ergebnis dokumentiert. Bei Genehmigung erhält der Mitarbeiter eine Bestätigung, andernfalls eine Ablehnung."
 Answer:
+BRANCHES:
+- "während gleichzeitig": parallel work, split on transition t_antrag_einreichen, 2 outgoing arcs
+- "danach": the parallel branches join on transition t_ergebnis_dokumentieren, 2 incoming arcs
+- "bei Genehmigung ... andernfalls": exclusive choice on place p_dokumentiert, 2 outgoing arcs
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
-<place id="p1"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
-<transition id="t1"><name><text>urlaubsantrag einreichen</text></name></transition>
-<place id="p2"/>
-<place id="p3"/>
-<transition id="t2"><name><text>antrag prüfen</text></name></transition>
-<transition id="t3"><name><text>zeitkonto aktualisieren</text></name></transition>
-<place id="p4"/>
-<place id="p5"/>
-<transition id="t4"><name><text>ergebnis dokumentieren</text></name></transition>
-<place id="p6"/>
-<transition id="t5"><name><text>bestätigung senden</text></name></transition>
-<transition id="t6"><name><text>ablehnung senden</text></name></transition>
-<place id="p7"><name><text>end</text></name></place>
-<arc id="a1" source="p1" target="t1"/>
-<arc id="a2" source="t1" target="p2"/>
-<arc id="a3" source="t1" target="p3"/>
-<arc id="a4" source="p2" target="t2"/>
-<arc id="a5" source="p3" target="t3"/>
-<arc id="a6" source="t2" target="p4"/>
-<arc id="a7" source="t3" target="p5"/>
-<arc id="a8" source="p4" target="t4"/>
-<arc id="a9" source="p5" target="t4"/>
-<arc id="a10" source="t4" target="p6"/>
-<arc id="a11" source="p6" target="t5"/>
-<arc id="a12" source="p6" target="t6"/>
-<arc id="a13" source="t5" target="p7"/>
-<arc id="a14" source="t6" target="p7"/>
+<place id="p_start"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
+<transition id="t_antrag_einreichen"><name><text>urlaubsantrag einreichen</text></name></transition>
+<place id="p_antrag_offen"/>
+<place id="p_zeitkonto_offen"/>
+<transition id="t_antrag_pruefen"><name><text>antrag prüfen</text></name></transition>
+<transition id="t_zeitkonto_aktualisieren"><name><text>zeitkonto aktualisieren</text></name></transition>
+<place id="p_geprueft"/>
+<place id="p_aktualisiert"/>
+<transition id="t_ergebnis_dokumentieren"><name><text>ergebnis dokumentieren</text></name></transition>
+<place id="p_dokumentiert"/>
+<transition id="t_bestaetigung_senden"><name><text>bestätigung senden</text></name></transition>
+<transition id="t_ablehnung_senden"><name><text>ablehnung senden</text></name></transition>
+<place id="p_end"><name><text>end</text></name></place>
+<arc id="a1" source="p_start" target="t_antrag_einreichen"/>
+<arc id="a2" source="t_antrag_einreichen" target="p_antrag_offen"/>
+<arc id="a3" source="t_antrag_einreichen" target="p_zeitkonto_offen"/>
+<arc id="a4" source="p_antrag_offen" target="t_antrag_pruefen"/>
+<arc id="a5" source="p_zeitkonto_offen" target="t_zeitkonto_aktualisieren"/>
+<arc id="a6" source="t_antrag_pruefen" target="p_geprueft"/>
+<arc id="a7" source="t_zeitkonto_aktualisieren" target="p_aktualisiert"/>
+<arc id="a8" source="p_geprueft" target="t_ergebnis_dokumentieren"/>
+<arc id="a9" source="p_aktualisiert" target="t_ergebnis_dokumentieren"/>
+<arc id="a10" source="t_ergebnis_dokumentieren" target="p_dokumentiert"/>
+<arc id="a11" source="p_dokumentiert" target="t_bestaetigung_senden"/>
+<arc id="a12" source="p_dokumentiert" target="t_ablehnung_senden"/>
+<arc id="a13" source="t_bestaetigung_senden" target="p_end"/>
+<arc id="a14" source="t_ablehnung_senden" target="p_end"/>
 </net>
 </pnml>
 
-Work internally: first identify the places, then the transitions, then the arcs. Emit only the final result.
-Reply with exactly one well-formed PNML XML document and nothing else.
+Description: "Simultaneously, the goods are packed and the invoice is created. Afterwards the parcel is shipped."
+Answer:
+BRANCHES:
+- "simultaneously": parallel work at the very start, no activity precedes it, so a routing transition t_split carries it, 2 outgoing arcs
+- "afterwards": the parallel branches join on transition t_ship_parcel, 2 incoming arcs
+<?xml version="1.0" encoding="UTF-8"?>
+<pnml>
+<net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
+<place id="p_start"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
+<transition id="t_split"/>
+<place id="p_to_pack"/>
+<place id="p_to_invoice"/>
+<transition id="t_pack_goods"><name><text>pack goods</text></name></transition>
+<transition id="t_create_invoice"><name><text>create invoice</text></name></transition>
+<place id="p_packed"/>
+<place id="p_invoiced"/>
+<transition id="t_ship_parcel"><name><text>ship parcel</text></name></transition>
+<place id="p_end"><name><text>end</text></name></place>
+<arc id="a1" source="p_start" target="t_split"/>
+<arc id="a2" source="t_split" target="p_to_pack"/>
+<arc id="a3" source="t_split" target="p_to_invoice"/>
+<arc id="a4" source="p_to_pack" target="t_pack_goods"/>
+<arc id="a5" source="p_to_invoice" target="t_create_invoice"/>
+<arc id="a6" source="t_pack_goods" target="p_packed"/>
+<arc id="a7" source="t_create_invoice" target="p_invoiced"/>
+<arc id="a8" source="p_packed" target="t_ship_parcel"/>
+<arc id="a9" source="p_invoiced" target="t_ship_parcel"/>
+<arc id="a10" source="t_ship_parcel" target="p_end"/>
+</net>
+</pnml>
+
+Reply with the BRANCHES list, then exactly one well-formed PNML XML document, and nothing else.
