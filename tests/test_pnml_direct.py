@@ -1,10 +1,11 @@
+import re
 import unittest
 from unittest.mock import patch
 
 from app import create_app
 from app.services.llm_service import EmptyResponseError, LLMService
 from app.services.pnml_validator import PnmlValidator
-from config import TestingConfig
+from config import BaseConfig, TestingConfig
 
 PT_NET_TYPE = "http://www.informatik.hu-berlin.de/top/pntd/ptNetb"
 
@@ -336,6 +337,77 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         self.assertIn(broken, pnml)
         self.assertEqual(len(issues), 1)
 
+    def test_best_attempt_with_fewest_issues_is_delivered(self):
+        two_issues = VALID_NET.replace(
+            '<arc id="a1" source="p1" target="t1"/>',
+            '<arc id="a1" source="p1" target="t1"/>'
+            '<arc id="a0" source="p1" target="t1"/>',
+        ).replace(
+            '<arc id="a2" source="t1" target="p2"/>',
+            '<arc id="a2" source="t1" target="p2"/>'
+            '<arc id="a3" source="t1" target="p2"/>',
+        )
+        one_issue = _with_duplicate_arc("a4")
+        # 2 issues -> 1 issue -> identical (stop); the 1-issue attempt wins.
+        pnml, issues, mocked = self._generate([two_issues, one_issue, one_issue])
+        self.assertEqual(mocked.call_count, 3)
+        self.assertEqual(len(issues), 1)
+        self.assertIn('id="a4"', pnml)
+
+    @patch("app.services.llm_service.genai")
+    def test_gemini_provider_is_dispatched(self, mock_genai):
+        with patch.object(
+            LLMService, "_gemini_generate_once", side_effect=[VALID_NET]
+        ) as mocked:
+            pnml, issues = self.service.generate_pnml(
+                api_key="test-key",
+                provider="gemini",
+                model="gemini-2.0-flash",
+                user_text="ship the order",
+                system_prompt="prompt under test",
+            )
+        self.assertEqual(issues, [])
+        mocked.assert_called_once()
+        mock_genai.configure.assert_called_once_with(api_key="test-key")
+
+
+class TestGeneratePnmlIntegration(unittest.TestCase):
+    """The complete chain HTTP -> route -> service -> validator -> correction
+    loop -> response; only the bare provider call is mocked."""
+
+    @patch("app.model_registry.refresh_model_cache")
+    def setUp(self, mock_refresh_model_cache):
+        self.app = create_app(TestingConfig)
+        self.client = self.app.test_client()
+
+    def _post(self, replies):
+        with patch("app.api.routes.model_registry.is_valid", return_value=True), \
+             patch("app.api.pnml_routes.model_registry.refresh_model_cache"), \
+             patch.object(LLMService, "_openai_generate_once", side_effect=replies):
+            return self.client.post(
+                "/generate_pnml",
+                json={
+                    "user_text": "ship the order",
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                },
+                headers={"Authorization": "Bearer test-key"},
+            )
+
+    def test_invalid_first_reply_is_corrected_end_to_end(self):
+        response = self._post([_with_duplicate_arc("a3"), VALID_NET])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "application/xml")
+        self.assertTrue(response.data.startswith(b"<?xml"))
+        self.assertNotIn("X-Validation-Issues", response.headers)
+
+    def test_persistent_issues_deliver_best_effort_with_header(self):
+        broken = _with_duplicate_arc("a3")
+        response = self._post([broken, broken, broken, broken])
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'id="a3"', response.data)
+        self.assertIn("duplicate arc", response.headers["X-Validation-Issues"])
+
 
 class TestDemoPage(unittest.TestCase):
     @patch("app.model_registry.refresh_model_cache")
@@ -421,6 +493,32 @@ class TestGeneratePnmlRoute(unittest.TestCase):
         self.assertEqual(
             response.get_json()["error"]["code"], "invalid_request"
         )
+
+    @patch("app.api.pnml_routes.model_registry.refresh_model_cache")
+    @patch("app.api.routes.model_registry.is_valid", return_value=True)
+    @patch(
+        "app.api.pnml_routes._llm_service.generate_pnml",
+        side_effect=Exception("Rate limit exceeded for requests"),
+    )
+    def test_provider_quota_maps_to_429(self, _generate, _valid, _refresh):
+        response = self._post()
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.get_json()["error"]["code"], "rate_limited")
+
+
+class TestPromptValidatorParity(unittest.TestCase):
+    """The system prompt may never teach a format its own validation rejects:
+    every PNML document embedded in the prompt (skeleton and examples) must
+    pass all validation levels."""
+
+    def test_every_prompt_document_passes_validation(self):
+        prompt = BaseConfig.PNML_SYSTEM_PROMPT
+        documents = re.findall(r"<pnml\b.*?</pnml>", prompt, re.DOTALL)
+        self.assertGreaterEqual(len(documents), 3)
+        for document in documents:
+            self.assertEqual(
+                PnmlValidator().validate_pnml(document), [], document[:100]
+            )
 
 
 if __name__ == "__main__":
