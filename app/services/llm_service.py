@@ -19,6 +19,14 @@ _PNML_BLOCK_RE = re.compile(r"<pnml\b.*?</pnml>", re.DOTALL | re.IGNORECASE)
 # passes because it carries the previous document and its issues).
 _PNML_MAX_CORRECTIONS = 3
 
+# Output budget for the direct-PNML path only. The /generate defaults are too
+# small here: a full PNML document is far longer than the standard path's BPMN
+# JSON, and on GPT-5 variants reasoning tokens draw from the same budget (a
+# 4096 cap was fully consumed by reasoning, yielding an empty reply). Gemini
+# is capped at 8192, the hard output limit of gemini-2.0-flash.
+_PNML_OPENAI_MAX_COMPLETION_TOKENS = 16384
+_PNML_GEMINI_MAX_OUTPUT_TOKENS = 8192
+
 logger = logging.getLogger(__name__)
 
 
@@ -397,7 +405,14 @@ class LLMService:
         return json.dumps(sanitized, ensure_ascii=False)
 
     @staticmethod
-    def _openai_generate_once(client, system_prompt, model, prompt):
+    def _openai_generate_once(
+        client,
+        system_prompt,
+        model,
+        prompt,
+        max_completion_tokens=4096,
+        reasoning_effort=None,
+    ):
         model_name = (model or "").lower()
         request_kwargs = {
             "messages": [
@@ -405,8 +420,10 @@ class LLMService:
                 {"role": "user", "content": prompt},
             ],
             "model": model,
-            "max_completion_tokens": 4096,
+            "max_completion_tokens": max_completion_tokens,
         }
+        if reasoning_effort is not None:
+            request_kwargs["reasoning_effort"] = reasoning_effort
         # GPT-5 variants can reject explicit temperature values and only accept
         # provider defaults. Avoid first-attempt 400s by omitting it up front.
         if not model_name.startswith("gpt-5"):
@@ -456,11 +473,14 @@ class LLMService:
         return content
 
     @staticmethod
-    def _gemini_generate_once(gen_model, prompt):
+    def _gemini_generate_once(gen_model, prompt, max_output_tokens=2048):
         response = gen_model.generate_content(
             prompt,
             generation_config=genai.types.GenerationConfig(
-                temperature=0.0, top_k=1, top_p=1.0, max_output_tokens=2048
+                temperature=0.0,
+                top_k=1,
+                top_p=1.0,
+                max_output_tokens=max_output_tokens,
             ),
         )
         text = ((response.text or "") if hasattr(response, "text") else "").strip()
@@ -681,10 +701,20 @@ class LLMService:
             if openai_base_url:
                 client_kwargs["base_url"] = openai_base_url
             client = OpenAI(**client_kwargs)
+            # reasoning_effort is a GPT-5-only knob; other models reject the
+            # parameter (same gating as the temperature special case).
+            reasoning_effort = (
+                "low" if (model or "").lower().startswith("gpt-5") else None
+            )
 
             def generate_once(prompt):
                 return self._openai_generate_once(
-                    client, system_prompt, model, prompt
+                    client,
+                    system_prompt,
+                    model,
+                    prompt,
+                    max_completion_tokens=_PNML_OPENAI_MAX_COMPLETION_TOKENS,
+                    reasoning_effort=reasoning_effort,
                 )
 
         elif method_name == "call_gemini":
@@ -698,7 +728,11 @@ class LLMService:
             )
 
             def generate_once(prompt):
-                return self._gemini_generate_once(gen_model, prompt)
+                return self._gemini_generate_once(
+                    gen_model,
+                    prompt,
+                    max_output_tokens=_PNML_GEMINI_MAX_OUTPUT_TOKENS,
+                )
 
         else:
             raise ValueError(f"Unsupported provider: {provider}")
