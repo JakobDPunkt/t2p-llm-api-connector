@@ -36,6 +36,17 @@ from app.services.llm_service import EmptyResponseError
 logger = logging.getLogger(__name__)
 
 
+@bp.route("/demo")
+def pnml_demo():
+    """Serve the comparison demo page for the direct-PNML experiment.
+
+    Demo tooling analogous to the Swagger UI at ``/docs``: one static page
+    that calls ``/generate_pnml`` (this connector) and the live deployment's
+    ``/v2/generate/pnml`` side by side.
+    """
+    return current_app.send_static_file("pnml_demo.html")
+
+
 @bp.route("/generate_pnml", methods=["POST"])
 # Browser demo clients call this endpoint directly; expose the issues header
 # so cross-origin JavaScript may read it.

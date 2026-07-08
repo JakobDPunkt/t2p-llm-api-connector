@@ -337,6 +337,19 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         self.assertEqual(len(issues), 1)
 
 
+class TestDemoPage(unittest.TestCase):
+    @patch("app.model_registry.refresh_model_cache")
+    def setUp(self, mock_refresh_model_cache):
+        self.app = create_app(TestingConfig)
+        self.client = self.app.test_client()
+
+    def test_demo_page_is_served(self):
+        response = self.client.get("/demo")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "text/html")
+        self.assertIn(b"Text to PNML Demo", response.data)
+
+
 class TestGeneratePnmlRoute(unittest.TestCase):
     @patch("app.model_registry.refresh_model_cache")
     def setUp(self, mock_refresh_model_cache):

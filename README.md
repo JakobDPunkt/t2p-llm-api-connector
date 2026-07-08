@@ -70,6 +70,37 @@ providers. If you pass `Authorization: Bearer <api_key>`, the connector can use 
 discovery; otherwise it uses configured environment keys when available. See `/openapi.json`
 or the Swagger UI at `/docs/` for the full API contract.
 
+## Direct text-to-PNML (experimental)
+
+`POST /generate_pnml` generates a Petri net **directly** from a process description: one
+LLM call with a PNML-enriched system prompt, no BPMN JSON intermediate and no
+model-transformer. Same auth and request shape as `/generate` (without
+`prompting_strategy` — the endpoint has exactly one strategy):
+
+```
+curl -X POST http://localhost:5005/generate_pnml \
+  -H "Authorization: Bearer <your-provider-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"user_text": "A customer places an order. The order is checked.", "provider": "openai", "model": "gpt-4o"}'
+```
+
+The response body is one pure, geometry-free PNML document (`application/xml`) —
+structurally equivalent to the model-transformer's output, so the standard pipeline's
+post-processing (coordinate assignment in t2p-2.0) keeps working. The connector validates
+the generated net (valid XML, document structure, static workflow-net structure) and runs
+up to three LLM correction passes. If issues remain, the best attempt is still delivered
+and the issues are reported in the `X-Validation-Issues` response header.
+
+### Comparison demo
+
+Open **`http://localhost:5005/demo`** for a self-contained comparison page (demo tooling,
+analogous to the Swagger UI): enter one process description and run the direct endpoint
+and the live WoPeD pipeline (`https://woped.dhbw-karlsruhe.de/t2p-2.0`) side by side —
+each side with its own backend, provider, model and API key, rendered as Petri nets with
+response time and structure stats. Nets from the direct endpoint are geometry-free by
+contract; the page lays them out client-side for display only. No additional local
+services are required — the pipeline side calls the public live deployment.
+
 ## Provider Host Configuration
 
 By default, providers are called via their public endpoints. For production gateways,

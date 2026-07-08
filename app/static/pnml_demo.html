@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Text to PNML Demo</title>
+<link rel="stylesheet" href="static/pnml_demo.css">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page">
+    <h1>Text to PNML Demo</h1>
+    <p>Compare two text-to-PNML backends side by side.</p>
+  </header>
+
+  <!-- ============ input ============ -->
+  <section class="card">
+    <label for="text">Process description</label>
+    <textarea id="text" placeholder="Example: A customer places an order. The order is checked. If it is valid it is shipped, otherwise it is rejected."></textarea>
+
+    <div class="panels">
+      <div>
+        <div class="panel-head">
+          <h2>Left</h2>
+          <span class="mode-note" id="note-a"></span>
+        </div>
+        <div class="field-grid">
+          <div class="full">
+            <label for="mode-a">Backend</label>
+            <select id="mode-a">
+              <option value="direct" selected>Direct PNML (/generate_pnml)</option>
+              <option value="pipeline">Pipeline (/v2/generate/pnml)</option>
+            </select>
+          </div>
+          <div>
+            <label for="provider-a">Provider</label>
+            <select id="provider-a"></select>
+          </div>
+          <div>
+            <label for="model-a">Model</label>
+            <input id="model-a" list="models-a" placeholder="e.g. gpt-4o" autocomplete="off">
+            <datalist id="models-a"></datalist>
+          </div>
+          <div class="full">
+            <label for="key-a">API key</label>
+            <input id="key-a" type="password" placeholder="sk-…" autocomplete="off">
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="panel-head">
+          <h2>Right</h2>
+          <span class="mode-note" id="note-b"></span>
+        </div>
+        <div class="field-grid">
+          <div class="full">
+            <label for="mode-b">Backend</label>
+            <select id="mode-b">
+              <option value="direct">Direct PNML (/generate_pnml)</option>
+              <option value="pipeline" selected>Pipeline (/v2/generate/pnml)</option>
+            </select>
+          </div>
+          <div>
+            <label for="provider-b">Provider</label>
+            <select id="provider-b"></select>
+          </div>
+          <div>
+            <label for="model-b">Model</label>
+            <input id="model-b" list="models-b" placeholder="e.g. gpt-4o" autocomplete="off">
+            <datalist id="models-b"></datalist>
+          </div>
+          <div class="full">
+            <label for="key-b">API key</label>
+            <input id="key-b" type="password" placeholder="same as left" autocomplete="off">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="run" disabled>Run both</button>
+      <span class="hint" id="run-hint">Enter a description, model and API key to start.</span>
+    </div>
+  </section>
+
+  <!-- ============ results ============ -->
+  <div class="panels" id="results">
+    <section class="card" id="result-a">
+      <div class="result-head"></div>
+      <div class="banner-slot"></div>
+      <div class="canvas"><div class="placeholder">The generated net appears here.</div></div>
+      <div class="result-actions">
+        <button data-act="xml" disabled>View PNML</button>
+        <button data-act="download" disabled>Download .pnml</button>
+      </div>
+    </section>
+    <section class="card" id="result-b">
+      <div class="result-head"></div>
+      <div class="banner-slot"></div>
+      <div class="canvas"><div class="placeholder">The generated net appears here.</div></div>
+      <div class="result-actions">
+        <button data-act="xml" disabled>View PNML</button>
+        <button data-act="download" disabled>Download .pnml</button>
+      </div>
+    </section>
+  </div>
+
+  <footer class="page">
+    Demo page for the experimental /generate_pnml endpoint. Renderer adapted from woped-web (MIT).
+  </footer>
+</div>
+
+<dialog id="xml-dialog">
+  <div class="dialog-head">
+    <h3 id="xml-title">PNML</h3>
+    <button id="xml-close" aria-label="Close">×</button>
+  </div>
+  <pre id="xml-body" tabindex="0"></pre>
+</dialog>
+
+<script src="static/pnml_demo.js"></script>
+</body>
+</html>
