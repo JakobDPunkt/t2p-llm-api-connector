@@ -41,13 +41,13 @@ def pnml_demo():
     """Serve the comparison demo page for the direct-PNML experiment.
 
     Demo tooling analogous to the Swagger UI at ``/docs``: one static page
-    that calls ``/generate_pnml`` (this connector) and the live deployment's
+    that calls ``/generate_pnml_direct`` (this connector) and the live deployment's
     ``/v2/generate/pnml`` side by side.
     """
     return current_app.send_static_file("pnml_demo.html")
 
 
-@bp.route("/generate_pnml", methods=["POST"])
+@bp.route("/generate_pnml_direct", methods=["POST"])
 # Browser demo clients call this endpoint directly; expose the issues header
 # so cross-origin JavaScript may read it.
 @cross_origin(expose_headers=["X-Validation-Issues"])
@@ -133,7 +133,7 @@ def generate_pnml():
     except Exception as e:
         if isinstance(e, EmptyResponseError):
             status = "400"
-            logger.warning("/generate_pnml rejected provider response: %s", e)
+            logger.warning("/generate_pnml_direct rejected provider response: %s", e)
             return _v2_error(
                 400,
                 "invalid_request",
@@ -142,7 +142,7 @@ def generate_pnml():
 
         if _is_quota_error(e):
             status = "429"
-            logger.warning("/generate_pnml provider quota exceeded: %s", e)
+            logger.warning("/generate_pnml_direct provider quota exceeded: %s", e)
             return _v2_error(
                 429,
                 "rate_limited",
@@ -153,12 +153,12 @@ def generate_pnml():
             )
 
         status = "500"
-        logger.exception("/generate_pnml failed: %s", e)
+        logger.exception("/generate_pnml_direct failed: %s", e)
         return _v2_error(500, "upstream_error", "The LLM provider call failed.")
     finally:
         REQUEST_COUNT.labels(
-            method="POST", endpoint="/generate_pnml", status=status
+            method="POST", endpoint="/generate_pnml_direct", status=status
         ).inc()
-        REQUEST_LATENCY.labels(method="POST", endpoint="/generate_pnml").observe(
+        REQUEST_LATENCY.labels(method="POST", endpoint="/generate_pnml_direct").observe(
             time.time() - start_time
         )

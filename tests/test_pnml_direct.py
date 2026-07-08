@@ -385,7 +385,7 @@ class TestGeneratePnmlIntegration(unittest.TestCase):
              patch("app.api.pnml_routes.model_registry.refresh_model_cache"), \
              patch.object(LLMService, "_openai_generate_once", side_effect=replies):
             return self.client.post(
-                "/generate_pnml",
+                "/generate_pnml_direct",
                 json={
                     "user_text": "ship the order",
                     "provider": "openai",
@@ -436,7 +436,7 @@ class TestGeneratePnmlRoute(unittest.TestCase):
         }
         payload.update(overrides)
         return self.client.post(
-            "/generate_pnml",
+            "/generate_pnml_direct",
             json=payload,
             headers={"Authorization": "Bearer test-key"},
         )
@@ -476,7 +476,7 @@ class TestGeneratePnmlRoute(unittest.TestCase):
 
     def test_missing_auth_returns_401(self):
         response = self.client.post(
-            "/generate_pnml",
+            "/generate_pnml_direct",
             json={"user_text": "x", "provider": "openai", "model": "gpt-4o"},
         )
         self.assertEqual(response.status_code, 401)

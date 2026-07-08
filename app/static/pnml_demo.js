@@ -303,7 +303,7 @@ const PnmlRenderer = {
 
 /* =========================================================================
  * Backend contracts.
- * direct:   POST {origin}/generate_pnml  {user_text, provider, model}
+ * direct:   POST {origin}/generate_pnml_direct  {user_text, provider, model}
  *           -> raw PNML (application/xml) + X-Validation-Issues header
  * pipeline: POST {live}/v2/generate/pnml {text, provider, model}
  *           -> {"result": "<pnml…>"}   (same call woped-web makes)
@@ -325,7 +325,7 @@ const Api = {
     try {
       // Relative same-origin path so the page also works behind a
       // path-prefix reverse proxy (resolved against /demo).
-      const url = mode === "direct" ? "generate_pnml" : LIVE_BASE + "/v2/generate/pnml";
+      const url = mode === "direct" ? "generate_pnml_direct" : LIVE_BASE + "/v2/generate/pnml";
       const body = mode === "direct"
         ? { user_text: text, provider, model }
         : { text, provider, model };

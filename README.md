@@ -72,13 +72,13 @@ or the Swagger UI at `/docs/` for the full API contract.
 
 ## Direct text-to-PNML (experimental)
 
-`POST /generate_pnml` generates a Petri net **directly** from a process description: one
+`POST /generate_pnml_direct` generates a Petri net **directly** from a process description: one
 LLM call with a PNML-enriched system prompt, no BPMN JSON intermediate and no
 model-transformer. Same auth and request shape as `/generate` (without
 `prompting_strategy` — the endpoint has exactly one strategy):
 
 ```
-curl -X POST http://localhost:5005/generate_pnml \
+curl -X POST http://localhost:5005/generate_pnml_direct \
   -H "Authorization: Bearer <your-provider-api-key>" \
   -H "Content-Type: application/json" \
   -d '{"user_text": "A customer places an order. The order is checked.", "provider": "openai", "model": "gpt-4o"}'

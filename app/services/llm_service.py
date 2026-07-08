@@ -663,7 +663,7 @@ class LLMService:
         )
 
     def generate_pnml(self, api_key, provider, model, user_text, system_prompt):
-        """Experimental direct text-to-PNML entry point for ``/generate_pnml``.
+        """Experimental direct text-to-PNML entry point for ``/generate_pnml_direct``.
 
         Parallel to ``generate``: same provider dispatch, but one bare provider
         call with the PNML system prompt and the raw user text — no
