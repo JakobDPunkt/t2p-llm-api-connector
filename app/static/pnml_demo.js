@@ -427,9 +427,8 @@ const App = {
     for (const side of this.sides) {
       this.input("mode", side).addEventListener("change", () => this.onModeChange(side));
       this.input("provider", side).addEventListener("change", () => this.onProviderChange(side));
-      for (const name of ["model", "key"]) {
-        this.input(name, side).addEventListener("input", () => this.refreshRunButton());
-      }
+      this.input("model", side).addEventListener("change", () => this.refreshRunButton());
+      this.input("key", side).addEventListener("input", () => this.refreshRunButton());
       this.resultCard(side).querySelector('[data-act="xml"]')
         .addEventListener("click", () => this.showXml(side));
       this.resultCard(side).querySelector('[data-act="download"]')
@@ -492,42 +491,33 @@ const App = {
     this.onProviderChange(side, pairs);
   },
 
+  /** Strict select fed by the models endpoint, mirroring woped-web's
+   * mat-select: only advertised provider/model pairs are offered. */
   onProviderChange(side, pairs) {
     const mode = this.input("mode", side).value;
     const provider = this.input("provider", side).value;
-    const datalist = this.el(`models-${side}`);
-    datalist.innerHTML = "";
     const models = (pairs || this.modelCache[mode] || [])
       .filter((m) => m.provider === provider && m.model)
       .map((m) => m.model);
+    const modelSelect = this.input("model", side);
+    const previous = modelSelect.value;
+    modelSelect.innerHTML = "";
     for (const m of models) {
       const option = document.createElement("option");
-      option.value = m;
-      datalist.appendChild(option);
+      option.value = option.textContent = m;
+      modelSelect.appendChild(option);
     }
-    const modelInput = this.input("model", side);
-    // Fill an empty field, and replace a value that clearly belongs to
-    // another provider's advertised list, so a provider switch cannot
-    // submit a mismatched pair. Hand-typed custom names are kept.
-    const allKnown = Object.values(this.modelCache).flat();
-    const belongsElsewhere = allKnown.some(
-      (m) => m.model === modelInput.value && m.provider !== provider
-    );
-    if ((!modelInput.value || belongsElsewhere) && models.length) {
-      modelInput.value = models[0];
-    }
+    if (models.includes(previous)) modelSelect.value = previous;
     this.refreshRunButton();
   },
 
   settings(side) {
-    const key = this.input("key", side).value.trim()
-      || this.input("key", "a").value.trim();
     return {
       mode: this.input("mode", side).value,
       text: this.el("text").value.trim(),
       provider: this.input("provider", side).value,
       model: this.input("model", side).value.trim(),
-      apiKey: key,
+      apiKey: this.input("key", side).value.trim(),
     };
   },
 
@@ -544,23 +534,33 @@ const App = {
     note.textContent = text;
   },
 
+  /** Sides run independently: a panel without its own API key (or with an
+   * unreachable backend) is simply left out of the run. */
   refreshRunButton() {
-    const ok = this.sides.every((side) => this.ready(side));
-    this.el("run").disabled = this.running || !ok;
+    const readySides = this.sides.filter((side) => this.ready(side));
+    this.el("run").disabled = this.running || readySides.length === 0;
+    this.el("run").textContent =
+      readySides.length === 1
+        ? readySides[0] === "a" ? "Run left" : "Run right"
+        : "Run both";
     this.el("run-hint").textContent = this.running
       ? "Runs in progress…"
-      : ok
+      : readySides.length === 2
         ? ""
-        : this.sides.some((side) => this.backendUp[side] === false)
-          ? "A selected backend is not reachable."
-          : "Enter a description, model and API key to start.";
+        : readySides.length === 1
+          ? "The other panel is skipped (no API key or backend not reachable)."
+          : this.sides.some((side) => this.backendUp[side] === false)
+            ? "A selected backend is not reachable."
+            : "Enter a description, model and API key to start.";
   },
 
   runBoth() {
     if (this.running || this.el("run").disabled) return;
+    const sides = this.sides.filter((side) => this.ready(side));
+    if (!sides.length) return;
     this.running = true;
     this.refreshRunButton();
-    Promise.allSettled(this.sides.map((side) => this.runSide(side))).then(() => {
+    Promise.allSettled(sides.map((side) => this.runSide(side))).then(() => {
       this.running = false;
       this.refreshRunButton();
     });
