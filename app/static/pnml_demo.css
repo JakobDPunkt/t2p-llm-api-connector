@@ -88,12 +88,13 @@
   .banner ul { margin: 6px 0 0; padding-left: 18px; }
 
   .canvas {
-    position: relative; display: flex;
+    position: relative;
     border: 1px solid var(--line); border-radius: 8px; background: #fff;
-    height: 400px; overflow: auto;
+    height: 400px; overflow: hidden;
   }
-  /* margin:auto inside flex: centres a small net, scrolls a large one */
-  .canvas svg { display: block; margin: auto; }
+  /* svg-pan-zoom owns the viewport: the svg fills the canvas, panning and
+     zooming happen inside it (no scrollbars). */
+  .canvas svg { display: block; width: 100%; height: 100%; }
   .canvas .placeholder {
     position: absolute; inset: 0; display: grid; place-items: center;
     color: var(--muted); font-size: 13.5px; text-align: center; padding: 0 24px;

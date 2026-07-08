@@ -3,7 +3,7 @@
 /* =========================================================================
  * PnmlParser + PnmlRenderer: adapted from woped-web, branch t2p-v2-test-env,
  * src/app/utilities/modelDisplayer.ts (MIT). TypeScript types stripped,
- * svg-pan-zoom replaced by a fixed-height scroll fit, and initialMarking
+ * pan/zoom via svg-pan-zoom as in woped-web, and initialMarking
  * parsing added so the start token is visible. The renderer itself invents
  * no positions: nodes without coordinates are laid out by AutoLayout first.
  * ========================================================================= */
@@ -89,8 +89,8 @@ const PnmlParser = {
 /* =========================================================================
  * AutoLayout: demo-only stand-in for the pipeline's server-side layouting
  * (t2p-2.0 assign_pnml_coordinates). Applied ONLY when the document carries
- * no coordinates — the direct endpoint is geometry-free by contract. Simple
- * layered layout: BFS from the start place, columns left to right.
+ * no coordinates — the direct endpoint is geometry-free by contract.
+ * Layered left-to-right layout via dagre (vendored @dagrejs/dagre).
  * ========================================================================= */
 
 const AutoLayout = {
@@ -107,40 +107,29 @@ const AutoLayout = {
     const nodes = new Map();
     for (const n of [...net.places, ...net.transitions]) nodes.set(n.id, n);
 
-    const outgoing = new Map();
-    const incoming = new Map();
+    const g = new dagre.graphlib.Graph();
+    // Node heights include the label row drawn below transitions, so rows
+    // laid out by dagre cannot collide with the text of the row above.
+    g.setGraph({ rankdir: "LR", nodesep: 40, ranksep: 70 });
+    g.setDefaultEdgeLabel(() => ({}));
+    for (const p of net.places) g.setNode(p.id, { width: 50, height: 50 });
+    for (const t of net.transitions) g.setNode(t.id, { width: 40, height: 55 });
     for (const a of net.arcs) {
-      if (!nodes.has(a.source) || !nodes.has(a.target)) continue;
-      (outgoing.get(a.source) || outgoing.set(a.source, []).get(a.source)).push(a.target);
-      (incoming.get(a.target) || incoming.set(a.target, []).get(a.target)).push(a.source);
+      if (nodes.has(a.source) && nodes.has(a.target)) g.setEdge(a.source, a.target);
     }
+    dagre.layout(g);
 
-    const starts = net.places
-      .filter((p) => p.marked || !(incoming.get(p.id) || []).length)
-      .map((p) => p.id);
-    const queue = (starts.length ? starts : [...nodes.keys()].slice(0, 1)).map(
-      (id) => [id, 0]
-    );
-    const layer = new Map();
-    while (queue.length) {
-      const [id, depth] = queue.shift();
-      if (layer.has(id)) continue;
-      layer.set(id, depth);
-      for (const next of outgoing.get(id) || []) queue.push([next, depth + 1]);
+    for (const [id, node] of nodes) {
+      const { x, y } = g.node(id);
+      node.x = x;
+      node.y = y;
     }
-    let spare = Math.max(-1, ...layer.values()) + 1;
-    for (const id of nodes.keys()) if (!layer.has(id)) layer.set(id, spare++);
-
-    const byLayer = new Map();
-    for (const [id, l] of layer) (byLayer.get(l) || byLayer.set(l, []).get(l)).push(id);
-
-    const X0 = 80, DX = 130, MID_Y = 210, DY = 100;
-    for (const [l, ids] of byLayer) {
-      ids.forEach((id, i) => {
-        const node = nodes.get(id);
-        node.x = X0 + l * DX;
-        node.y = MID_Y + (i - (ids.length - 1) / 2) * DY;
-      });
+    // Dagre routes edges around nodes (relevant for loops/back edges); keep
+    // its bend points so the renderer draws arcs the way they were laid out.
+    for (const a of net.arcs) {
+      const edge = g.edge(a.source, a.target);
+      const bends = edge ? edge.points.slice(1, -1) : [];
+      if (bends.length) a.waypoints = bends;
     }
   },
 };
@@ -152,7 +141,6 @@ const PnmlRenderer = {
   PLACE_R: 25,
   NODE_H: 34,
   TRANSITION_W: 40,
-  CANVAS_H: 368,
 
   node(tag, attrs) {
     const el = document.createElementNS(this.SVG_NS, tag);
@@ -216,19 +204,11 @@ const PnmlRenderer = {
     const vbX = minX - pad, vbY = minY - pad;
     const vbW = maxX - minX + 2 * pad, vbH = maxY - minY + 2 * pad;
 
-    // Height-fit with a zoom cap: a long net scrolls horizontally at full
-    // shape size instead of shrinking to a sliver (same intent as woped-web's
-    // height-fit re-zoom, without svg-pan-zoom), while a tiny net is not
-    // blown up beyond 1.5x its natural size. Height leaves room for a
-    // horizontal scrollbar inside the fixed-height canvas.
-    const MAX_SCALE = 1.5;
-    const scale = Math.min(this.CANVAS_H / vbH, MAX_SCALE);
-    const height = Math.max(1, Math.round(vbH * scale));
-    const width = Math.max(1, Math.round(vbW * scale));
     const svg = this.node("svg", {
       xmlns: this.SVG_NS,
       viewBox: `${vbX} ${vbY} ${vbW} ${vbH}`,
-      width, height,
+      width: "100%",
+      height: "100%",
     });
 
     const defs = this.node("defs", {});
@@ -298,6 +278,19 @@ const PnmlRenderer = {
 
     container.innerHTML = "";
     container.appendChild(svg);
+
+    // fit + center: the whole net is visible at first render; wheel,
+    // double-click, drag and the control icons take it from there.
+    svgPanZoom(svg, {
+      zoomEnabled: true,
+      controlIconsEnabled: true,
+      dblClickZoomEnabled: true,
+      mouseWheelZoomEnabled: true,
+      fit: true,
+      center: true,
+      minZoom: 0.1,
+      maxZoom: 50,
+    });
   },
 };
 
