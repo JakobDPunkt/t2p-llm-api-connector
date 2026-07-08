@@ -128,3 +128,7 @@
   }
 
   footer.page { margin-top: 28px; color: var(--muted); font-size: 12.5px; }
+
+.mode-note.status-ok { color: var(--ok); }
+.mode-note.status-bad { color: var(--err-ink); }
+.mode-note.status-checking { color: var(--muted); }

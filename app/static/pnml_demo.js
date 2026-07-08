@@ -392,6 +392,19 @@ const Api = {
     return message;
   },
 
+  /** Backend reachability probe. The pipeline backend has a dedicated
+   * health endpoint; the direct backend is the server that serves this
+   * page, so its /models call (needed for the dropdowns anyway) doubles
+   * as the probe — /health/ready would test provider connectivity
+   * instead and takes seconds. */
+  async reachable(mode) {
+    if (mode === "direct") return true; // refined by the models fetch below
+    const response = await fetch(LIVE_BASE + "/v2/health", {
+      signal: AbortSignal.timeout(8000),
+    });
+    return response.ok;
+  },
+
   /** Both backends advertise provider/model pairs; endpoint paths differ. */
   async models(mode) {
     const url = mode === "direct" ? "models" : LIVE_BASE + "/v2/models";
@@ -411,6 +424,7 @@ const App = {
   timers: { a: null, b: null },
   running: false,
   modeGeneration: { a: 0, b: 0 },
+  backendUp: { a: null, b: null },
 
   el(id) { return document.getElementById(id); },
   input(name, side) { return this.el(`${name}-${side}`); },
@@ -445,21 +459,35 @@ const App = {
     // Guard against a slow models fetch finishing after the user switched
     // the mode again: only the latest invocation may touch the controls.
     const generation = ++this.modeGeneration[side];
+    this.backendUp[side] = null;
+    this.setStatus(side, "checking", "checking backend…");
+    this.refreshRunButton();
     const providerSelect = this.input("provider", side);
     const previous = providerSelect.value;
     let pairs = this.modelCache[mode];
+    let reachable = Boolean(pairs);
     if (!pairs) {
       try {
+        const probe = Api.reachable(mode);
         pairs = this.modelCache[mode] = await Api.models(mode);
+        reachable = await probe;
       } catch {
-        // Fallback is NOT cached, so the next mode change retries the fetch.
+        // Neither result is cached, so the next mode change retries.
+        reachable = false;
         pairs = [
           { provider: "openai", model: "" },
           { provider: "gemini", model: "" },
         ];
       }
     }
+    if (!reachable) delete this.modelCache[mode];
     if (generation !== this.modeGeneration[side]) return;
+    this.backendUp[side] = reachable;
+    this.setStatus(
+      side,
+      reachable ? "ok" : "bad",
+      reachable ? "backend reachable" : "backend not reachable"
+    );
     const providers = [...new Set(pairs.map((m) => m.provider))];
     providerSelect.innerHTML = "";
     for (const p of providers) {
@@ -512,7 +540,15 @@ const App = {
 
   ready(side) {
     const s = this.settings(side);
-    return Boolean(s.text && s.provider && s.model && s.apiKey);
+    return Boolean(
+      this.backendUp[side] && s.text && s.provider && s.model && s.apiKey
+    );
+  },
+
+  setStatus(side, kind, text) {
+    const note = this.el(`note-${side}`);
+    note.className = "mode-note status-" + kind;
+    note.textContent = text;
   },
 
   refreshRunButton() {
@@ -522,7 +558,9 @@ const App = {
       ? "Runs in progress…"
       : ok
         ? ""
-        : "Enter a description, model and API key to start.";
+        : this.sides.some((side) => this.backendUp[side] === false)
+          ? "A selected backend is not reachable."
+          : "Enter a description, model and API key to start.";
   },
 
   runBoth() {
