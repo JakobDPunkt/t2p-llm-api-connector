@@ -398,10 +398,18 @@ const Api = {
     return response.ok;
   },
 
-  /** Both backends advertise provider/model pairs; endpoint paths differ. */
-  async models(mode) {
+  /** Both backends advertise provider/model pairs; endpoint paths differ.
+   * With an apiKey (direct mode only) the connector runs live discovery
+   * against the provider, so the list reflects what that key can access —
+   * that call takes longer than serving the cached list. The live
+   * /v2/models does not forward keys, so pipeline mode never sends one. */
+  async models(mode, apiKey) {
     const url = mode === "direct" ? "models" : LIVE_BASE + "/v2/models";
-    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const useKey = mode === "direct" && apiKey;
+    const response = await fetch(url, {
+      headers: useKey ? { Authorization: "Bearer " + apiKey } : undefined,
+      signal: AbortSignal.timeout(useKey ? 20000 : 8000),
+    });
     if (!response.ok) throw new Error("models endpoint " + response.status);
     const payload = await response.json();
     return Array.isArray(payload.models) ? payload.models : [];
@@ -414,6 +422,11 @@ const App = {
   sides: ["a", "b"],
   results: { a: null, b: null },
   modelCache: {},
+  // Per-side model list discovered with that side's API key (direct mode);
+  // null falls back to the unauthenticated modelCache list.
+  sidePairs: { a: null, b: null },
+  keyedModelCache: {},
+  keyTimers: { a: null, b: null },
   timers: { a: null, b: null },
   running: false,
   modeGeneration: { a: 0, b: 0 },
@@ -428,7 +441,10 @@ const App = {
       this.input("mode", side).addEventListener("change", () => this.onModeChange(side));
       this.input("provider", side).addEventListener("change", () => this.onProviderChange(side));
       this.input("model", side).addEventListener("change", () => this.refreshRunButton());
-      this.input("key", side).addEventListener("input", () => this.refreshRunButton());
+      this.input("key", side).addEventListener("input", () => {
+        this.refreshRunButton();
+        this.scheduleModelReload(side);
+      });
       this.resultCard(side).querySelector('[data-act="xml"]')
         .addEventListener("click", () => this.showXml(side));
       this.resultCard(side).querySelector('[data-act="download"]')
@@ -451,6 +467,7 @@ const App = {
     // Guard against a slow models fetch finishing after the user switched
     // the mode again: only the latest invocation may touch the controls.
     const generation = ++this.modeGeneration[side];
+    this.sidePairs[side] = null;
     this.backendUp[side] = null;
     this.setStatus(side, "checking", "checking backend…");
     this.refreshRunButton();
@@ -489,6 +506,39 @@ const App = {
     }
     if (providers.includes(previous)) providerSelect.value = previous;
     this.onProviderChange(side, pairs);
+    // Re-apply a key-based list after the base list replaced it.
+    if (this.input("key", side).value.trim()) this.reloadModels(side);
+  },
+
+  /** Debounced: refetch the model list with the side's API key once the
+   * user stops typing, so the dropdown shows what that key can access. */
+  scheduleModelReload(side) {
+    clearTimeout(this.keyTimers[side]);
+    this.keyTimers[side] = setTimeout(() => this.reloadModels(side), 600);
+  },
+
+  async reloadModels(side) {
+    const mode = this.input("mode", side).value;
+    if (mode !== "direct") return; // the live /v2/models ignores keys
+    const key = this.input("key", side).value.trim();
+    const generation = ++this.modeGeneration[side];
+    if (!key) {
+      this.sidePairs[side] = null;
+      this.onProviderChange(side);
+      return;
+    }
+    this.setModelsNote(side, "loading model list for this key…");
+    let pairs = this.keyedModelCache[key];
+    if (!pairs) {
+      try {
+        pairs = this.keyedModelCache[key] = await Api.models(mode, key);
+      } catch {
+        pairs = null; // discovery call failed: keep the current list
+      }
+    }
+    if (generation !== this.modeGeneration[side]) return;
+    if (pairs) this.sidePairs[side] = pairs;
+    this.onProviderChange(side);
   },
 
   /** Strict select fed by the models endpoint, mirroring woped-web's
@@ -496,7 +546,7 @@ const App = {
   onProviderChange(side, pairs) {
     const mode = this.input("mode", side).value;
     const provider = this.input("provider", side).value;
-    const models = (pairs || this.modelCache[mode] || [])
+    const models = (pairs || this.sidePairs[side] || this.modelCache[mode] || [])
       .filter((m) => m.provider === provider && m.model)
       .map((m) => m.model);
     const modelSelect = this.input("model", side);
@@ -508,7 +558,34 @@ const App = {
       modelSelect.appendChild(option);
     }
     if (models.includes(previous)) modelSelect.value = previous;
+    this.updateModelsNote(side);
     this.refreshRunButton();
+  },
+
+  setModelsNote(side, text) {
+    this.el(`models-note-${side}`).textContent = text;
+  },
+
+  /** One line under the model select telling the user where the list comes
+   * from — and how to get the full one. A fallback-only list has exactly
+   * one entry per provider. */
+  updateModelsNote(side) {
+    const mode = this.input("mode", side).value;
+    const hasKey = Boolean(this.input("key", side).value.trim());
+    const count = this.input("model", side).options.length;
+    let text;
+    if (mode === "pipeline") {
+      text = count > 1
+        ? `${count} models advertised by the live backend.`
+        : "Only the backend's default model is advertised.";
+    } else if (count > 1) {
+      text = `${count} models available for this provider.`;
+    } else if (hasKey) {
+      text = "Key not accepted for model discovery — default model only.";
+    } else {
+      text = "Enter your API key to load the provider's full model list.";
+    }
+    this.setModelsNote(side, text);
   },
 
   settings(side) {

@@ -58,6 +58,10 @@
     width: 100%; border: 1px solid var(--line); border-radius: 8px;
     padding: 8px 10px; font: inherit; background: #fff; color: var(--ink);
   }
+  .field-note {
+    display: block; min-height: 1.2em; margin-top: 4px;
+    font-size: 11.5px; color: var(--muted);
+  }
 
   .actions { margin-top: 16px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   button.primary {
