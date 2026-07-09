@@ -218,19 +218,19 @@ class TestPnmlStructure(unittest.TestCase):
             f"expected an issue containing {fragment!r}, got: {issues}",
         )
 
-    def test_activity_transition_without_a_label_is_reported(self):
-        # An unlabelled 1-in/1-out transition models an unnamed activity.
-        # Both the missing and the empty <name> count as unlabelled.
+    def test_nameless_transition_is_allowed(self):
+        # A transition without a <name> is a silent transition, a standard
+        # workflow-net construct. It is not reported, regardless of arc degree:
+        # forcing a label would make the model invent an undescribed activity.
         for unlabelled in ('<transition id="t1"/>', '<transition id="t1"><name/></transition>'):
             doc = VALID_NET.replace(
                 '<transition id="t1"><name><text>check order</text></name></transition>',
                 unlabelled,
             )
-            self.assert_issue(doc, "transition 't1' has one incoming and one outgoing")
+            self.assertEqual(_issues(doc), [])
 
     def test_nameless_routing_transitions_are_allowed(self):
-        # Per the system prompt the arc counts carry the split/join role, so a
-        # pure routing transition needs no label.
+        # Split/join routing transitions likewise need no label.
         self.assertEqual(_issues(AND_SPLIT_JOIN_NET), [])
 
     def test_ids_required_and_unique(self):

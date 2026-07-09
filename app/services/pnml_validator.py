@@ -417,19 +417,12 @@ class PnmlValidator:
                         "outgoing arc"
                     )
 
-        # The arc counts encode the role: exactly one incoming and one outgoing
-        # arc makes a transition a plain activity, which must carry its label.
-        # Splits and joins may be pure routing transitions and stay nameless.
-        for transition in _iter_local(net, "transition"):
-            tid = transition.get("id")
-            if len(incoming.get(tid, ())) == 1 and len(outgoing.get(tid, ())) == 1:
-                if not _child_text(transition, "name"):
-                    issues.append(
-                        f"transition '{tid}' has one incoming and one outgoing "
-                        "arc, so it models an activity, but carries no "
-                        "<name><text>; every activity must carry a verb-object "
-                        "label"
-                    )
+        # A transition without a <name> is a silent transition, a standard
+        # workflow-net construct (van der Aalst's routing "control tasks",
+        # WoPeD's silent transitions). It is never required to carry a label:
+        # forcing one would push the model to invent an activity the text does
+        # not describe. Labelling activities is encouraged in the prompt, not
+        # enforced here.
 
         # Every node lies on a path from source to sink. Needs an unambiguous
         # source and sink; their absence is already reported above.
