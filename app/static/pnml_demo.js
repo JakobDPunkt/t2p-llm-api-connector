@@ -322,11 +322,13 @@ function generationReport(history) {
   if (!history || !Array.isArray(history.attempts) || !history.attempts.length) {
     return null;
   }
-  const attempts = history.attempts;
+  const passes = history.attempts.map((a) => a.issues || []);
   return {
-    firstIssues: attempts[0].issues || [],
-    deliveredIssues: attempts[history.deliveredIndex].issues || [],
-    corrections: attempts.length - 1,
+    passes,                       // issues remaining after each attempt (0 = first)
+    deliveredIndex: history.deliveredIndex,
+    firstIssues: passes[0],
+    deliveredIssues: passes[history.deliveredIndex],
+    corrections: passes.length - 1,
   };
 }
 
@@ -783,24 +785,64 @@ const App = {
    *  correction loop has cleaned them up. Both are things the structural
    *  validator can see; a clean first attempt shows no banner. */
   setReportBanner(side, report, deliveredIssues) {
+    const slot = this.resultCard(side).querySelector(".banner-slot");
+    slot.innerHTML = "";
+
     // Pipeline (no attempt history): only surface remaining issues, if any.
     if (!report) {
       this.setBanner(side, deliveredIssues.length ? "warn" : null, deliveredIssues);
       return;
     }
-    if (report.deliveredIssues.length) {
-      this.setBanner(
-        side, "warn", report.deliveredIssues,
-        `${plural(report.deliveredIssues.length, "issue")} unresolved`
-      );
-    } else if (report.firstIssues.length) {
-      this.setBanner(
-        side, "info", report.firstIssues,
-        `${plural(report.firstIssues.length, "issue")} corrected`
-      );
-    } else {
-      this.setBanner(side, null);
+    const { passes, deliveredIndex, firstIssues, deliveredIssues: left, corrections } = report;
+    if (!firstIssues.length) return; // clean first attempt, nothing to report
+
+    const kind = left.length ? "warn" : "info";
+    const summary = left.length
+      ? `${plural(left.length, "issue")} unresolved after ${plural(corrections, "pass")}`
+      : `${plural(firstIssues.length, "issue")} corrected over ${plural(corrections, "pass")}`;
+
+    // A collapsible timeline: the first attempt's issues, then what each
+    // correction pass fixed (its predecessor's issues minus its own) and how
+    // many it left. This shows which pass resolved what.
+    const banner = document.createElement("div");
+    banner.className = "banner " + kind;
+    const root = document.createElement("details");
+    root.appendChild(this._summaryEl(summary));
+
+    const list = (items) => {
+      const ul = document.createElement("ul");
+      for (const it of items) {
+        const li = document.createElement("li");
+        li.textContent = it;
+        ul.appendChild(li);
+      }
+      return ul;
+    };
+    const pass = (title, items) => {
+      const d = document.createElement("details");
+      d.className = "pass";
+      d.appendChild(this._summaryEl(title));
+      d.appendChild(list(items.length ? items : ["(no change)"]));
+      root.appendChild(d);
+    };
+
+    pass(`First attempt: ${plural(firstIssues.length, "issue")}`, firstIssues);
+    for (let k = 1; k < passes.length; k++) {
+      const fixed = passes[k - 1].filter((i) => !passes[k].includes(i));
+      const tag = k === deliveredIndex ? " (delivered)" : "";
+      const remaining = passes[k].length;
+      pass(`Pass ${k}${tag}: fixed ${fixed.length}, ${remaining} left`, fixed);
     }
+    if (left.length) pass(`Still open: ${plural(left.length, "issue")}`, left);
+
+    banner.appendChild(root);
+    slot.appendChild(banner);
+  },
+
+  _summaryEl(text) {
+    const s = document.createElement("summary");
+    s.textContent = text;
+    return s;
   },
 
   setBanner(side, kind, items = [], summaryText) {

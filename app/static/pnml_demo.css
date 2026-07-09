@@ -97,7 +97,9 @@
   .banner.info { background: #eef2fb; border: 1px solid #cfd9f0; color: #2f4a86; }
   .banner.err  { background: var(--err-bg);  border: 1px solid var(--err-line);  color: var(--err-ink); }
   .banner summary { cursor: pointer; font-weight: 600; }
-  .banner ul { margin: 6px 0 0; padding-left: 18px; max-height: 220px; overflow: auto; }
+  .banner ul { margin: 6px 0 0; padding-left: 18px; max-height: 160px; overflow: auto; }
+  .banner details.pass { margin: 5px 0 0 10px; }
+  .banner details.pass > summary { font-weight: 500; font-size: 12px; }
 
   .canvas {
     position: relative;
