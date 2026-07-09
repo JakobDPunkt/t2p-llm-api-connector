@@ -21,7 +21,7 @@ STRUCTURE RULES:
 - Every node lies on a path from the start place to the end place.
 
 FROM TEXT TO NET:
-- Each activity in the description becomes one transition.
+- Each activity in the description becomes one transition. Model every activity the text mentions and never summarize, merge or drop steps: if the description names ten actions, the net has ten transitions.
 - An exclusive choice (either/or) is a place with one outgoing arc per alternative; the alternatives merge back into a shared place.
 - Parallel work (simultaneously/meanwhile) is a transition with one outgoing arc per branch; the branches join through one transition.
 - The arc counts alone carry these roles: a transition with exactly one incoming and one outgoing arc is a plain activity.

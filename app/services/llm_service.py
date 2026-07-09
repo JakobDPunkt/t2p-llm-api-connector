@@ -773,9 +773,12 @@ class LLMService:
                 client_kwargs["base_url"] = openai_base_url
             client = OpenAI(**client_kwargs)
             # reasoning_effort is a GPT-5-only knob; other models reject the
-            # parameter (same gating as the temperature special case).
+            # parameter (same gating as the temperature special case). "medium"
+            # is OpenAI's recommended balanced default: text-to-PNML has to both
+            # extract every activity and build a correct net, and "low" rushes
+            # that into summarized, under-modeled output.
             reasoning_effort = (
-                "low" if (model or "").lower().startswith("gpt-5") else None
+                "medium" if (model or "").lower().startswith("gpt-5") else None
             )
 
             def generate_once(prompt):
