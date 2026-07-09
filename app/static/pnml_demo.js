@@ -305,9 +305,10 @@ const PnmlRenderer = {
 const LIVE_BASE = "https://woped.dhbw-karlsruhe.de/t2p-2.0";
 const TIMEOUT_MS = 180000;
 
-/** "1 issue" / "3 issues" without the (s) shorthand. */
-function plural(n, word) {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
+/** "1 issue" / "3 issues" without the (s) shorthand. Irregular plurals pass
+ *  their own form: plural(2, "retry", "retries"). */
+function plural(n, word, many = word + "s") {
+  return `${n} ${n === 1 ? word : many}`;
 }
 
 /** Distil the direct backend's attempt history into the numbers the result
@@ -749,8 +750,10 @@ const App = {
     if (typeof ms === "number") add("time", (ms / 1000).toFixed(1) + " s");
     if (stats) add("stat", stats);
 
-    // Generation quality (direct backend only). One badge, consistently
-    // phrased; the detail of what went wrong lives in the report banner.
+    // Generation quality (direct backend only), then how much correcting it
+    // took. Quality is one badge, consistently phrased; the detail of what
+    // went wrong lives in the report banner. A clean first attempt needs no
+    // correction pass, so its retry badge stays off.
     if (report) {
       if (report.firstIssues.length === 0) {
         add("ok", "valid");
@@ -758,6 +761,9 @@ const App = {
         add("ok", "corrected");
       } else {
         add("warn", `${plural(report.deliveredIssues.length, "issue")} unresolved`);
+      }
+      if (report.corrections) {
+        add("stat", plural(report.corrections, "retry", "retries"));
       }
     }
   },
