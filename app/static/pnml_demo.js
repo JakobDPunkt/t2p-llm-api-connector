@@ -89,7 +89,7 @@ const PnmlParser = {
 /* =========================================================================
  * AutoLayout: demo-only stand-in for the pipeline's server-side layouting
  * (t2p-2.0 assign_pnml_coordinates). Applied ONLY when the document carries
- * no coordinates — the direct endpoint is geometry-free by contract.
+ * no coordinates; the direct endpoint is geometry-free by contract.
  * Layered left-to-right layout via dagre (vendored @dagrejs/dagre).
  * ========================================================================= */
 
@@ -413,8 +413,8 @@ const Api = {
   /** Backend reachability probe. The pipeline backend has a dedicated
    * health endpoint; the direct backend is the server that serves this
    * page, so its /models call (needed for the dropdowns anyway) doubles
-   * as the probe — /health/ready would test provider connectivity
-   * instead and takes seconds. */
+   * as the probe. /health/ready would test provider connectivity instead
+   * and takes seconds. */
   async reachable(mode) {
     if (mode === "direct") return true; // refined by the models fetch below
     const response = await fetch(LIVE_BASE + "/v2/health", {
@@ -425,7 +425,7 @@ const Api = {
 
   /** Both backends advertise provider/model pairs; endpoint paths differ.
    * With an apiKey (direct mode only) the connector runs live discovery
-   * against the provider, so the list reflects what that key can access —
+   * against the provider, so the list reflects what that key can access;
    * that call takes longer than serving the cached list. The live
    * /v2/models does not forward keys, so pipeline mode never sends one. */
   async models(mode, apiKey) {
@@ -592,7 +592,7 @@ const App = {
   },
 
   /** One line under the model select telling the user where the list comes
-   * from — and how to get the full one. A fallback-only list has exactly
+   * from, and how to get the full one. A fallback-only list has exactly
    * one entry per provider. */
   updateModelsNote(side) {
     const mode = this.input("mode", side).value;
@@ -606,7 +606,7 @@ const App = {
     } else if (count > 1) {
       text = `${count} models available for this provider.`;
     } else if (hasKey) {
-      text = "Key not accepted for model discovery — default model only.";
+      text = "Key not accepted for model discovery. Default model only.";
     } else {
       text = "Enter your API key to load the provider's full model list.";
     }
@@ -763,8 +763,8 @@ const App = {
   },
 
   /** Show what the direct backend's generation actually did: the delivered
-   *  net's remaining problems, or — when the correction loop cleaned them up —
-   *  what the model's first attempt got wrong. Both are things the structural
+   *  net's remaining problems, or what the first attempt got wrong once the
+   *  correction loop has cleaned them up. Both are things the structural
    *  validator can see; a clean first attempt shows no banner. */
   setReportBanner(side, report, deliveredIssues) {
     // Pipeline (no attempt history): only surface remaining issues, if any.

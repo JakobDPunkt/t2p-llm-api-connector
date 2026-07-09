@@ -6,7 +6,7 @@ payload validation, error mapping and metrics reuse the ``/generate``
 machinery unchanged.
 
 Response contract: the body is one pure, geometry-free PNML document
-(application/xml) — structurally equivalent to the model-transformer's
+(application/xml), structurally equivalent to the model-transformer's
 output, so downstream post-processing (coordinate assignment in t2p-2.0)
 keeps working. Validation issues remaining after the correction loop do
 not block delivery (best effort); they are reported in the CORS-exposed
@@ -161,7 +161,7 @@ def generate_pnml():
 
         # Debug view (demo only): the full attempt history as JSON, so the page
         # can show the model's unaided first shot and what each correction pass
-        # changed. The default contract is unchanged -- pure application/xml.
+        # changed. The default contract is unchanged: pure application/xml.
         if _debug_requested():
             return jsonify(_generation_debug_payload(generation)), 200
 

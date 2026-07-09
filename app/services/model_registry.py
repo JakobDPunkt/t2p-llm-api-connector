@@ -2,8 +2,8 @@
 
 This is the single source of truth used by both:
 
-* ``GET /models`` — to advertise the available provider/model pairs, and
-* ``POST /generate`` — to validate the requested provider and to decide which
+* ``GET /models``: to advertise the available provider/model pairs, and
+* ``POST /generate``: to validate the requested provider and to decide which
     ``LLMService`` method handles the call.
 
 Keeping the registry here (instead of inline in the routes) means the advertised

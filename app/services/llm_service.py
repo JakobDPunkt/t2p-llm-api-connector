@@ -757,7 +757,7 @@ class LLMService:
         """Experimental direct text-to-PNML entry point for ``/generate_pnml_direct``.
 
         Parallel to ``generate``: same provider dispatch, but one bare provider
-        call with the PNML system prompt and the raw user text — no
+        call with the PNML system prompt and the raw user text: no
         PromptBuilder, no few-shot orchestration, no JSON handling.
 
         Returns a :class:`PnmlGeneration`: the full attempt history plus the
@@ -830,7 +830,7 @@ class LLMService:
         # Correction loop: up to _PNML_MAX_CORRECTIONS passes, each carrying
         # the previous document plus the combined issue list. Stops early
         # when a pass leaves the issues absolutely identical (no progress).
-        # Cosmetic deviations never reach this loop -- the validator strips
+        # Cosmetic deviations never reach this loop: the validator strips
         # them deterministically, so no correction pass is spent on them.
         # Every pass is recorded: the raw history is the only place where the
         # model's unaided first shot, and any shrinkage along the way, survive.
@@ -862,7 +862,7 @@ class LLMService:
             except TruncatedResponseError:
                 # A truncated repair has nothing to add; keep the best attempt
                 # so far rather than discarding it. Truncation on the initial
-                # generation still raises -- there is nothing to fall back to.
+                # generation still raises, as there is nothing to fall back to.
                 logger.warning(
                     "PNML correction truncated at the token limit; "
                     "keeping the previous attempt"

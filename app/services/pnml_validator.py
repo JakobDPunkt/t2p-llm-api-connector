@@ -3,14 +3,14 @@
 Structural counterpart of ``ModelValidator`` on the standard BPMN-JSON path.
 ``check()`` answers three questions in one pass, in this order:
 
-1. **Gates** — is this a PNML document at all? Valid XML with a ``<pnml>``
+1. **Gates**: is this a PNML document at all? Valid XML with a ``<pnml>``
    root and exactly one ``<net>``. Nothing else can be said otherwise.
-2. **Normalization** — deterministic clean-up of everything that carries no
+2. **Normalization**: deterministic clean-up of everything that carries no
    P/T-net semantics: ``<graphics>``, ``<toolspecific>``, ``<inscription>``,
    unexpected elements, ``<net>`` attributes, empty place names. ``<page>``
    is unwrapped rather than dropped: it is a container, and its children are
    the net. Every clean-up is reported in ``stripped``.
-3. **Structural checks** — the contract invariants that make the document a
+3. **Structural checks**: the contract invariants that make the document a
    workflow net: transition labels, resolvable and unique ids, bipartiteness,
    no duplicate or self arcs, exactly one start and one end place, the single
    one-token initial marking on the start place, transition connectivity, and
@@ -19,8 +19,8 @@ Structural counterpart of ``ModelValidator`` on the standard BPMN-JSON path.
 Normalization is NOT the heuristic sanitize step this validator deliberately
 omits: it never invents structure. It only removes what the structural checks
 do not read, so it cannot mask a real defect. Where a fix would require
-guessing the model's intent -- duplicate parallel arcs, self-loops, dangling
-nodes -- the finding stays an issue and is corrected by the LLM instead.
+guessing the model's intent (duplicate parallel arcs, self-loops, dangling
+nodes), the finding stays an issue and is corrected by the LLM instead.
 
 Only ``issues`` warrant a correction pass; ``stripped`` is a record of the
 model's cosmetic habits, paid for with zero LLM calls.
@@ -30,9 +30,9 @@ else is collected into ONE combined issue list so a single correction pass can
 fix as many real issues as possible. Behavioural soundness (token game
 analysis) is deliberately out of scope.
 
-Issue messages state the violated rule and, where all causes allow it, the
-possible fixes -- deliberately without one-sided repair heuristics that could
-point the correction in a wrong direction.
+Issue messages name the offending element and state the violated rule, and
+stop there: naming a repair would point the correction at one of several
+possible causes, and the model is better placed to pick between them.
 
 XML namespaces are tolerated throughout (matching the namespace-agnostic
 downstream parsers): elements are matched by local name.
@@ -47,7 +47,7 @@ _NET_CHILDREN = ("place", "transition", "arc")
 _ALLOWED_NET_CHILDREN = set(_NET_CHILDREN)
 
 # Removed wherever they appear: none of the structural checks read them, so
-# dropping them cannot hide a defect. <page> is handled separately -- it is a
+# dropping them cannot hide a defect. <page> is handled separately: it is a
 # container whose children are the net itself.
 _STRIPPED_ELEMENTS = {
     "graphics": "the output is geometry-free; layouting happens downstream",
@@ -325,9 +325,8 @@ class PnmlValidator:
                 if ref not in node_ids:
                     issues.append(
                         f"arc '{arc_id}' references unknown {role} '{ref}'; "
-                        "either the reference is misspelled or the node is "
-                        "missing — the arc must reference an existing place "
-                        "or transition"
+                        "every arc must reference an existing place or "
+                        "transition"
                     )
                     unresolved = True
             if unresolved:
@@ -337,15 +336,13 @@ class PnmlValidator:
                 issues.append(
                     f"arc '{arc_id}' connects place '{source}' to place "
                     f"'{target}'; arcs must alternate between places and "
-                    "transitions — either a transition is missing in between "
-                    "or the arc itself is wrong"
+                    "transitions"
                 )
             elif source in transition_ids and target in transition_ids:
                 issues.append(
                     f"arc '{arc_id}' connects transition '{source}' to "
                     f"transition '{target}'; arcs must alternate between "
-                    "places and transitions — either a place is missing in "
-                    "between or the arc itself is wrong"
+                    "places and transitions"
                 )
 
             # A second identical arc reads as an arc weight of 2 downstream;
@@ -355,7 +352,7 @@ class PnmlValidator:
                 issues.append(
                     f"duplicate arc from '{source}' to '{target}' (arc "
                     f"'{arc_id}'); only one arc per direction is allowed "
-                    "between two nodes — remove the duplicates"
+                    "between two nodes"
                 )
             seen_connections.add((source, target))
 
@@ -402,9 +399,8 @@ class PnmlValidator:
             if incoming.get(marked_id):
                 issues.append(
                     f"place '{marked_id}' carries the initial marking but "
-                    "has incoming arcs; the marking must sit on the start "
-                    "place — either the marking is on the wrong place or the "
-                    f"incoming arcs of '{marked_id}' are wrong"
+                    "has incoming arcs; the initial marking must sit on the "
+                    "start place"
                 )
 
         # Every transition takes part in the flow (mirrors
@@ -417,9 +413,8 @@ class PnmlValidator:
                 if not degree.get(tid):
                     issues.append(
                         f"transition '{tid}' has no {direction} arc; every "
-                        "transition needs incoming and outgoing arcs — "
-                        "connect it to the flow or remove it if it is not "
-                        "part of the process"
+                        "transition needs at least one incoming and one "
+                        "outgoing arc"
                     )
 
         # The arc counts encode the role: exactly one incoming and one outgoing
@@ -432,7 +427,8 @@ class PnmlValidator:
                     issues.append(
                         f"transition '{tid}' has one incoming and one outgoing "
                         "arc, so it models an activity, but carries no "
-                        "<name><text>; add the activity label (verb-object)"
+                        "<name><text>; every activity must carry a verb-object "
+                        "label"
                     )
 
         # Every node lies on a path from source to sink. Needs an unambiguous
@@ -457,8 +453,7 @@ class PnmlValidator:
             for node in sorted(node_ids - (reachable & co_reachable)):
                 issues.append(
                     f"node '{node}' lies on no path from the start place to "
-                    "the end place; every node must take part in the flow — "
-                    "connect it or remove it"
+                    "the end place; every node must lie on such a path"
                 )
 
         return issues

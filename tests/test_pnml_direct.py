@@ -297,7 +297,7 @@ class TestPnmlStructure(unittest.TestCase):
             '<arc id="a1" source="p1" target="t1"/>'
             '<arc id="a2" source="t1" target="p2"/>'
         )
-        self.assert_issue(doc, "the marking must sit on the start place")
+        self.assert_issue(doc, "'p2' carries the initial marking but has incoming arcs")
 
     def test_transition_connectivity(self):
         doc = _net(
