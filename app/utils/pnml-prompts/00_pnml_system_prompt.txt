@@ -22,8 +22,9 @@ STRUCTURE RULES:
 
 FROM TEXT TO NET:
 - Each described action becomes one transition; model every action and drop none. But a list of checks or details inside one action ("inspect brakes: levers, calipers, pads") is that one action, not one transition each.
-- An exclusive choice (either/or) is a place with one outgoing arc per alternative; the alternatives merge back into a shared place.
-- Parallel work (simultaneously/meanwhile) is a transition with one outgoing arc per branch; the branches join through one transition.
+- An exclusive choice (either/or) is a place with one outgoing arc per alternative.
+- Parallel work (simultaneously/meanwhile) is a transition with one outgoing arc per branch.
+- Merges mirror splits: alternatives and loops rejoin at a place, where a token from any one branch continues; parallel branches synchronize at a transition that waits for all of them. Never merge alternatives at a transition: with several incoming arcs it fires only when every branch has a token, which deadlocks the net.
 - The arc counts alone carry these roles: a transition with exactly one incoming and one outgoing arc is a plain activity.
 - A split or join sits on the transition of the adjacent activity where the description has one; otherwise insert a transition without a <name>, which only routes the flow.
 - A repetition (again/until) is an arc from a transition back to the place where the repeated part starts.
@@ -37,7 +38,7 @@ ACTIVITIES: the described actions in process order, one verb-object label per li
 
 BRANCHES: each branch point on one line: its cue, exclusive choice or parallel work, and the node (by id) that carries it. The XML never states this, so decide it here.
 
-Then build from the lists: join consecutive activities through a place, but where BRANCHES applies, split the flow there (a choice at a place, parallel work at a transition) and merge it back, and route a repetition from a transition back to an earlier place. Never flatten a branching or looping process into one straight line. Every listed activity must end up connected, and a transition left without arcs is a mistake. Before finishing, confirm every BRANCHES entry and every loop appears in the net, nothing is arc-less, and only the start place lacks an incoming and only the end place lacks an outgoing arc.
+Then build from the lists: join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and reconverge it the same way: a choice and a loop rejoin at a place, parallel work at a transition. Route a repetition from a transition back to an earlier place. Never flatten a branching or looping process into one straight line. Every listed activity must end up connected, and a transition left without arcs is a mistake. Before finishing, confirm every BRANCHES entry and every loop appears in the net and reconverges at the right node type (a place for choices and loops, a transition only for parallel work), nothing is arc-less, and only the start place lacks an incoming and only the end place lacks an outgoing arc.
 
 STYLE:
 - Activity transitions carry a concise verb-object label in the language of the description. Routing transitions and intermediate places need no name.
