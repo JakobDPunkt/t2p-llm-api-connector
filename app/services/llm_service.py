@@ -65,6 +65,29 @@ class EmptyResponseError(ValueError):
         self.raw_reply = raw_reply
 
 
+class TruncatedResponseError(ValueError):
+    """Raised when the provider stopped at its output token limit.
+
+    The reply is cut off and cannot hold a complete PNML document, so it is
+    reported as truncation rather than as a generic "no PNML" failure.
+    ``raw_reply`` carries the partial answer for diagnostics.
+    """
+
+    def __init__(self, *args, raw_reply=None):
+        super().__init__(*args)
+        self.raw_reply = raw_reply
+
+
+def _is_truncation_reason(finish_reason):
+    """Whether a provider finish reason signals an output-token-limit cutoff.
+
+    Covers OpenAI's ``length`` and Gemini's ``MAX_TOKENS``, tolerating both
+    plain strings and enum values (compared by name).
+    """
+    name = getattr(finish_reason, "name", None) or str(finish_reason or "")
+    return name.upper() in {"LENGTH", "MAX_TOKENS"}
+
+
 class LLMService:
     """Service class for handling LLM API calls"""
 
@@ -501,6 +524,16 @@ class LLMService:
                 refusal,
             )
             raise EmptyResponseError("OpenAI returned empty message content.")
+        if _is_truncation_reason(finish_reason):
+            logger.warning(
+                "OpenAI truncated the reply at the token limit "
+                "(model=%s, completion_tokens=%s)",
+                getattr(chat_completion, "model", model),
+                completion_tokens,
+            )
+            raise TruncatedResponseError(
+                "OpenAI stopped at the output token limit.", raw_reply=content
+            )
         return content
 
     @staticmethod
@@ -517,6 +550,13 @@ class LLMService:
         text = ((response.text or "") if hasattr(response, "text") else "").strip()
         if not text:
             raise EmptyResponseError("Gemini returned empty response text.")
+        candidates = getattr(response, "candidates", None) or []
+        finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+        if _is_truncation_reason(finish_reason):
+            logger.warning("Gemini truncated the reply at the token limit.")
+            raise TruncatedResponseError(
+                "Gemini stopped at the output token limit.", raw_reply=text
+            )
         return text
 
     def call_openai(
@@ -817,7 +857,17 @@ class LLMService:
             repair_prompt = self._build_pnml_repair_prompt(
                 user_text, current.pnml, current.issues
             )
-            corrected = self._extract_pnml_document(generate_once(repair_prompt))
+            try:
+                corrected = self._extract_pnml_document(generate_once(repair_prompt))
+            except TruncatedResponseError:
+                # A truncated repair has nothing to add; keep the best attempt
+                # so far rather than discarding it. Truncation on the initial
+                # generation still raises -- there is nothing to fall back to.
+                logger.warning(
+                    "PNML correction truncated at the token limit; "
+                    "keeping the previous attempt"
+                )
+                break
             if corrected is None:
                 logger.warning(
                     "PNML correction reply contained no PNML document; "

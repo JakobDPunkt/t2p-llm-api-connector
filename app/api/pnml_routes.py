@@ -31,7 +31,7 @@ from app.api.routes import (
     _validate_generate_payload,
 )
 from app.services import model_registry
-from app.services.llm_service import EmptyResponseError
+from app.services.llm_service import EmptyResponseError, TruncatedResponseError
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +173,25 @@ def generate_pnml():
         return response
 
     except Exception as e:
+        if isinstance(e, TruncatedResponseError):
+            status = "400"
+            excerpt = _reply_excerpt(getattr(e, "raw_reply", None))
+            logger.warning(
+                "/generate_pnml_direct truncated at token limit: %s (reply: %s)",
+                e,
+                excerpt or "<empty>",
+            )
+            return _v2_error(
+                400,
+                "response_truncated",
+                (
+                    "The model reached its output token limit before finishing "
+                    "the net. The process may be too long for this model. Try a "
+                    "shorter description or a larger model."
+                ),
+                details=[f"Partial reply: {excerpt}"] if excerpt else None,
+            )
+
         if isinstance(e, EmptyResponseError):
             status = "400"
             excerpt = _reply_excerpt(getattr(e, "raw_reply", None))
