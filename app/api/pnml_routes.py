@@ -38,19 +38,9 @@ logger = logging.getLogger(__name__)
 #: How much of a non-PNML provider reply to surface in the debug view.
 _REPLY_EXCERPT_LIMIT = 500
 
-#: Reasoning efforts the ``?effort=`` override accepts (GPT-5 only).
-_ALLOWED_EFFORTS = {"low", "medium", "high"}
-
-
 def _debug_requested():
     """Whether the caller asked for the attempt-history JSON (demo only)."""
     return request.args.get("debug") == "1"
-
-
-def _requested_effort():
-    """Per-request reasoning-effort override, or None to use the default."""
-    effort = (request.args.get("effort") or "").lower()
-    return effort if effort in _ALLOWED_EFFORTS else None
 
 
 def _reply_excerpt(reply):
@@ -165,7 +155,6 @@ def generate_pnml():
             model=model,
             user_text=data["user_text"],
             system_prompt=current_app.config["PNML_SYSTEM_PROMPT"],
-            reasoning_effort=_requested_effort(),
         )
         best = generation.best
 

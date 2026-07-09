@@ -338,7 +338,7 @@ const Api = {
     pipeline: { label: "Pipeline" },
   },
 
-  async generate(mode, { text, provider, model, apiKey, effort }) {
+  async generate(mode, { text, provider, model, apiKey }) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     const started = performance.now();
@@ -346,10 +346,9 @@ const Api = {
       // Relative same-origin path so the page also works behind a
       // path-prefix reverse proxy (resolved against /demo).
       // debug=1 asks the direct backend for the full attempt history (JSON)
-      // instead of bare PNML; effort overrides the GPT-5 reasoning effort so
-      // the two sides can be compared.
+      // instead of bare PNML, so the page can show the correction timeline.
       const url = mode === "direct"
-        ? `generate_pnml_direct?debug=1&effort=${encodeURIComponent(effort)}`
+        ? "generate_pnml_direct?debug=1"
         : LIVE_BASE + "/v2/generate/pnml";
       const body = mode === "direct"
         ? { user_text: text, provider, model }
@@ -629,7 +628,6 @@ const App = {
       provider: this.input("provider", side).value,
       model: this.input("model", side).value.trim(),
       apiKey: this.input("key", side).value.trim(),
-      effort: this.input("effort", side).value,
     };
   },
 
@@ -746,10 +744,7 @@ const App = {
     // provider/model pair stays available on hover.
     const title = document.createElement("span");
     title.className = "result-title";
-    // The effort is named for the direct backend (where it applies) so two
-    // direct runs at different efforts stay distinguishable.
-    const effortTag = settings.mode === "direct" ? ` (${settings.effort})` : "";
-    title.textContent = Api.modesInfo[settings.mode].label + effortTag;
+    title.textContent = Api.modesInfo[settings.mode].label;
     title.title = `${settings.provider} / ${settings.model}`;
     head.appendChild(title);
 

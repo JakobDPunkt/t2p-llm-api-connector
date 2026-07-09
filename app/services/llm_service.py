@@ -466,7 +466,6 @@ class LLMService:
         model,
         prompt,
         max_completion_tokens=4096,
-        reasoning_effort=None,
     ):
         model_name = (model or "").lower()
         request_kwargs = {
@@ -477,8 +476,6 @@ class LLMService:
             "model": model,
             "max_completion_tokens": max_completion_tokens,
         }
-        if reasoning_effort is not None:
-            request_kwargs["reasoning_effort"] = reasoning_effort
         # GPT-5 variants can reject explicit temperature values and only accept
         # provider defaults. Avoid first-attempt 400s by omitting it up front.
         if not model_name.startswith("gpt-5"):
@@ -763,17 +760,17 @@ class LLMService:
             model=model,
         )
 
-    def generate_pnml(
-        self, api_key, provider, model, user_text, system_prompt, reasoning_effort=None
-    ):
+    def generate_pnml(self, api_key, provider, model, user_text, system_prompt):
         """Experimental direct text-to-PNML entry point for ``/generate_pnml_direct``.
 
         Parallel to ``generate``: same provider dispatch, but one bare provider
         call with the PNML system prompt and the raw user text: no
         PromptBuilder, no few-shot orchestration, no JSON handling.
 
-        ``reasoning_effort`` overrides the configured default for this call
-        (used by the demo to compare efforts); it applies to GPT-5 models only.
+        Reasoning effort is left at each model's own default. OpenAI sets it
+        per model on purpose (gpt-5/gpt-5.5 "medium", gpt-5.4 "none", ...);
+        overriding it with a blanket value fought those defaults and, on
+        low-default models, made reasoning consume the whole token budget.
 
         Returns a :class:`PnmlGeneration`: the full attempt history plus the
         index of the delivered one. Per contract the document is delivered even
@@ -787,18 +784,6 @@ class LLMService:
             if openai_base_url:
                 client_kwargs["base_url"] = openai_base_url
             client = OpenAI(**client_kwargs)
-            # reasoning_effort is a GPT-5-only knob; other models reject the
-            # parameter (same gating as the temperature special case). The
-            # effort comes from the per-request override or the configured
-            # default ("medium", OpenAI's balanced choice): text-to-PNML has to
-            # both extract every activity and build a correct net, and "low"
-            # rushes that into summarized, under-modeled output.
-            effort = reasoning_effort or self._config_value(
-                "PNML_REASONING_EFFORT", "medium"
-            )
-            reasoning_effort = (
-                effort if (model or "").lower().startswith("gpt-5") else None
-            )
 
             def generate_once(prompt):
                 return self._openai_generate_once(
@@ -807,7 +792,6 @@ class LLMService:
                     model,
                     prompt,
                     max_completion_tokens=_PNML_OPENAI_MAX_COMPLETION_TOKENS,
-                    reasoning_effort=reasoning_effort,
                 )
 
         elif method_name == "call_gemini":
