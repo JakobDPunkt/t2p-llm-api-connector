@@ -43,10 +43,11 @@ _PNML_MAX_CORRECTIONS = 3
 
 # Output budget for the direct-PNML path only. The /generate defaults are too
 # small here: a full PNML document is far longer than the standard path's BPMN
-# JSON, and on GPT-5 variants reasoning tokens draw from the same budget (a
-# 4096 cap was fully consumed by reasoning, yielding an empty reply). Gemini
-# is capped at 8192, the hard output limit of gemini-2.0-flash.
-_PNML_OPENAI_MAX_COMPLETION_TOKENS = 16384
+# JSON, and on GPT-5 variants reasoning tokens draw from the same budget. At
+# "medium" reasoning on a long process, 16384 was fully consumed by reasoning
+# on some models, yielding an empty reply; 32768 leaves room for reasoning and
+# the net. Gemini is capped at 8192, the hard output limit of gemini-2.0-flash.
+_PNML_OPENAI_MAX_COMPLETION_TOKENS = 32768
 _PNML_GEMINI_MAX_OUTPUT_TOKENS = 8192
 
 logger = logging.getLogger(__name__)
@@ -516,6 +517,25 @@ class LLMService:
             completion_tokens,
             len(content),
         )
+        # Truncation is checked before emptiness: on GPT-5 models reasoning
+        # draws from the same budget, so a token-limit stop can leave the
+        # content empty. That is exhausted budget, not a refusal, and gets a
+        # message that says so instead of a bare "empty reply".
+        if _is_truncation_reason(finish_reason):
+            logger.warning(
+                "OpenAI stopped at the token limit "
+                "(model=%s, completion_tokens=%s, content_len=%d); raise the "
+                "token budget or lower reasoning effort",
+                getattr(chat_completion, "model", model),
+                completion_tokens,
+                len(content),
+            )
+            raise TruncatedResponseError(
+                "OpenAI reached its output token limit. On GPT-5 models "
+                "reasoning shares this budget, so raise it or lower the "
+                "reasoning effort.",
+                raw_reply=content,
+            )
         if not content:
             logger.warning(
                 "OpenAI returned empty message content (model=%s, finish_reason=%s, refusal=%r)",
@@ -524,16 +544,6 @@ class LLMService:
                 refusal,
             )
             raise EmptyResponseError("OpenAI returned empty message content.")
-        if _is_truncation_reason(finish_reason):
-            logger.warning(
-                "OpenAI truncated the reply at the token limit "
-                "(model=%s, completion_tokens=%s)",
-                getattr(chat_completion, "model", model),
-                completion_tokens,
-            )
-            raise TruncatedResponseError(
-                "OpenAI stopped at the output token limit.", raw_reply=content
-            )
         return content
 
     @staticmethod
@@ -753,12 +763,17 @@ class LLMService:
             model=model,
         )
 
-    def generate_pnml(self, api_key, provider, model, user_text, system_prompt):
+    def generate_pnml(
+        self, api_key, provider, model, user_text, system_prompt, reasoning_effort=None
+    ):
         """Experimental direct text-to-PNML entry point for ``/generate_pnml_direct``.
 
         Parallel to ``generate``: same provider dispatch, but one bare provider
         call with the PNML system prompt and the raw user text: no
         PromptBuilder, no few-shot orchestration, no JSON handling.
+
+        ``reasoning_effort`` overrides the configured default for this call
+        (used by the demo to compare efforts); it applies to GPT-5 models only.
 
         Returns a :class:`PnmlGeneration`: the full attempt history plus the
         index of the delivered one. Per contract the document is delivered even
@@ -773,12 +788,16 @@ class LLMService:
                 client_kwargs["base_url"] = openai_base_url
             client = OpenAI(**client_kwargs)
             # reasoning_effort is a GPT-5-only knob; other models reject the
-            # parameter (same gating as the temperature special case). "medium"
-            # is OpenAI's recommended balanced default: text-to-PNML has to both
-            # extract every activity and build a correct net, and "low" rushes
-            # that into summarized, under-modeled output.
+            # parameter (same gating as the temperature special case). The
+            # effort comes from the per-request override or the configured
+            # default ("medium", OpenAI's balanced choice): text-to-PNML has to
+            # both extract every activity and build a correct net, and "low"
+            # rushes that into summarized, under-modeled output.
+            effort = reasoning_effort or self._config_value(
+                "PNML_REASONING_EFFORT", "medium"
+            )
             reasoning_effort = (
-                "medium" if (model or "").lower().startswith("gpt-5") else None
+                effort if (model or "").lower().startswith("gpt-5") else None
             )
 
             def generate_once(prompt):

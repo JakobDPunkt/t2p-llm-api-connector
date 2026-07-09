@@ -303,7 +303,10 @@ const PnmlRenderer = {
  * ========================================================================= */
 
 const LIVE_BASE = "https://woped.dhbw-karlsruhe.de/t2p-2.0";
-const TIMEOUT_MS = 180000;
+// Medium reasoning on a long process can run past three minutes; keep the
+// client above the slowest observed backend time so finished nets are not
+// discarded by a premature abort.
+const TIMEOUT_MS = 240000;
 
 /** "1 issue" / "3 issues" without the (s) shorthand. Irregular plurals pass
  *  their own form: plural(2, "retry", "retries"). */
@@ -333,7 +336,7 @@ const Api = {
     pipeline: { label: "Pipeline" },
   },
 
-  async generate(mode, { text, provider, model, apiKey }) {
+  async generate(mode, { text, provider, model, apiKey, effort }) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     const started = performance.now();
@@ -341,8 +344,11 @@ const Api = {
       // Relative same-origin path so the page also works behind a
       // path-prefix reverse proxy (resolved against /demo).
       // debug=1 asks the direct backend for the full attempt history (JSON)
-      // instead of bare PNML, so the page can show the model's first shot.
-      const url = mode === "direct" ? "generate_pnml_direct?debug=1" : LIVE_BASE + "/v2/generate/pnml";
+      // instead of bare PNML; effort overrides the GPT-5 reasoning effort so
+      // the two sides can be compared.
+      const url = mode === "direct"
+        ? `generate_pnml_direct?debug=1&effort=${encodeURIComponent(effort)}`
+        : LIVE_BASE + "/v2/generate/pnml";
       const body = mode === "direct"
         ? { user_text: text, provider, model }
         : { text, provider, model };
@@ -621,6 +627,7 @@ const App = {
       provider: this.input("provider", side).value,
       model: this.input("model", side).value.trim(),
       apiKey: this.input("key", side).value.trim(),
+      effort: this.input("effort", side).value,
     };
   },
 
@@ -737,7 +744,10 @@ const App = {
     // provider/model pair stays available on hover.
     const title = document.createElement("span");
     title.className = "result-title";
-    title.textContent = Api.modesInfo[settings.mode].label;
+    // The effort is named for the direct backend (where it applies) so two
+    // direct runs at different efforts stay distinguishable.
+    const effortTag = settings.mode === "direct" ? ` (${settings.effort})` : "";
+    title.textContent = Api.modesInfo[settings.mode].label + effortTag;
     title.title = `${settings.provider} / ${settings.model}`;
     head.appendChild(title);
 

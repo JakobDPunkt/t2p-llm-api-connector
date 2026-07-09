@@ -31,6 +31,9 @@ class BaseConfig:
     PNML_SYSTEM_PROMPT = _load_prompt_from_txt(
         "pnml-prompts", "00_pnml_system_prompt.txt"
     )
+    # Default GPT-5 reasoning effort for the direct-PNML path. "medium" is
+    # OpenAI's balanced default; a per-request ?effort= override wins over it.
+    PNML_REASONING_EFFORT = os.environ.get("PNML_REASONING_EFFORT") or "medium"
     # Optional provider hosts/base URLs (useful for proxies, gateways, or
     # enterprise endpoints).
     OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_HOST")
