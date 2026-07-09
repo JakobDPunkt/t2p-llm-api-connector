@@ -13,6 +13,10 @@ from config import get_config
 
 logger = logging.getLogger(__name__)
 
+#: Identifies the handler this module installs, so repeated create_app() calls
+#: reuse it instead of stacking duplicates on the root logger.
+_STDOUT_HANDLER_NAME = "woped-stdout"
+
 
 def _ensure_stdout_logging(level=logging.INFO):
     """Ensure process log handlers emit to stdout.
@@ -22,14 +26,23 @@ def _ensure_stdout_logging(level=logging.INFO):
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
+    # Redirect only handlers that write to the process's own streams (e.g.
+    # gunicorn's stderr handler). Handlers writing anywhere else belong to
+    # someone else -- pytest's capture handlers wrap a StringIO and break
+    # when their stream is swapped out from under them.
+    own_streams = {sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__}
+
     has_stdout_handler = False
     for handler in root_logger.handlers:
-        if isinstance(handler, logging.StreamHandler):
+        if not isinstance(handler, logging.StreamHandler):
+            continue
+        if handler.name == _STDOUT_HANDLER_NAME or handler.stream in own_streams:
             handler.setStream(sys.stdout)
             has_stdout_handler = True
 
     if not has_stdout_handler:
         stdout_handler = logging.StreamHandler(stream=sys.stdout)
+        stdout_handler.name = _STDOUT_HANDLER_NAME
         stdout_handler.setLevel(level)
         stdout_handler.setFormatter(
             logging.Formatter("%(levelname)s:%(name)s:%(message)s")
