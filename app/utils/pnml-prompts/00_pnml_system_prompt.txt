@@ -37,7 +37,7 @@ First list the activities the description mentions under ACTIVITIES, one verb-ob
 
 Then list every branch point under BRANCHES, one line each: the cue that justifies it, whether it is an exclusive choice or parallel work, and the node that carries it (by id). Deciding this before writing arcs settles the choice-versus-parallel distinction, which the finished XML never states.
 
-Then write the document: give every entry in your ACTIVITIES list its own transition and follow your BRANCHES list. Before you finish, check every listed activity has a transition.
+Then write the document: give every entry in your ACTIVITIES list its own transition and follow your BRANCHES list. Before you finish, check two things. Every listed activity has a transition. And every node is wired into the flow: each place has an incoming and an outgoing arc except the single start place (no incoming) and the single end place (no outgoing), and no place or transition is left with no arcs.
 
 STYLE:
 - Activity transitions carry a concise verb-object label in the language of the description. Routing transitions and intermediate places need no name.

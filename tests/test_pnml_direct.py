@@ -299,15 +299,33 @@ class TestPnmlStructure(unittest.TestCase):
         )
         self.assert_issue(doc, "'p2' carries the initial marking but has incoming arcs")
 
-    def test_transition_connectivity(self):
+    def test_transition_missing_one_direction_is_reported(self):
+        # t2 has an incoming arc but no outgoing one: the specific message.
         doc = _net(
             MARKED_START + '<transition id="t1"/><place id="p2"/>'
             '<transition id="t2"/>'
             '<arc id="a1" source="p1" target="t1"/>'
             '<arc id="a2" source="t1" target="p2"/>'
+            '<arc id="a3" source="p2" target="t2"/>'
         )
-        self.assert_issue(doc, "'t2' has no incoming arc")
         self.assert_issue(doc, "'t2' has no outgoing arc")
+
+    def test_isolated_node_is_reported_as_disconnected_once(self):
+        # A node with no arcs at all surfaces once as disconnected, not as a
+        # spurious extra start/end place or a doubled no-incoming/no-outgoing
+        # pair. p_iso (a place) and t2 (a transition) are both fully isolated.
+        doc = _net(
+            MARKED_START + '<transition id="t1"/><place id="p2"/>'
+            '<place id="p_iso"/><transition id="t2"/>'
+            '<arc id="a1" source="p1" target="t1"/>'
+            '<arc id="a2" source="t1" target="p2"/>'
+        )
+        issues = _issues(doc)
+        self.assertTrue(any("'p_iso' has no arcs at all" in i for i in issues), issues)
+        self.assertTrue(any("'t2' has no arcs at all" in i for i in issues), issues)
+        # Not miscounted as a second start/end, nor doubled per direction.
+        self.assertFalse(any("start place" in i for i in issues), issues)
+        self.assertFalse(any("no incoming arc" in i for i in issues), issues)
 
     def test_duplicate_parallel_arcs_are_reported(self):
         doc = VALID_NET.replace(

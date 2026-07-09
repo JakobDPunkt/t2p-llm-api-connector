@@ -360,8 +360,29 @@ class PnmlValidator:
             outgoing.setdefault(source, set()).add(target)
             incoming.setdefault(target, set()).add(source)
 
-        sources = sorted(p for p in place_ids if not incoming.get(p))
-        sinks = sorted(p for p in place_ids if not outgoing.get(p))
+        # A node with no arcs at all is disconnected. Report it once and
+        # plainly: otherwise a single isolated place surfaces confusingly as
+        # both a spurious extra start place and a spurious extra end place, and
+        # a correction pass told only "2 start places" cannot tell what to
+        # reconnect.
+        disconnected = {
+            n for n in node_ids if not incoming.get(n) and not outgoing.get(n)
+        }
+        for node in sorted(disconnected):
+            kind = "place" if node in place_ids else "transition"
+            issues.append(
+                f"{kind} '{node}' has no arcs at all; it is disconnected from "
+                "the flow, so connect it to the process or remove it"
+            )
+
+        # Start and end places exclude the disconnected ones, so an isolated
+        # node is not also miscounted as a second start and a second end.
+        sources = sorted(
+            p for p in place_ids if not incoming.get(p) and p not in disconnected
+        )
+        sinks = sorted(
+            p for p in place_ids if not outgoing.get(p) and p not in disconnected
+        )
         if len(sources) != 1:
             issues.append(
                 "the net must have exactly one start place (a place without "
@@ -404,8 +425,12 @@ class PnmlValidator:
                 )
 
         # Every transition takes part in the flow (mirrors
-        # validate_pnml_connectivity in t2p-2.0).
+        # validate_pnml_connectivity in t2p-2.0). Fully isolated transitions
+        # are already reported as disconnected above, so skip them here to
+        # avoid a redundant second message.
         for tid in sorted(transition_ids):
+            if tid in disconnected:
+                continue
             for direction, degree in (
                 ("incoming", incoming),
                 ("outgoing", outgoing),
@@ -443,7 +468,7 @@ class PnmlValidator:
 
             reachable = _closure(sources[0], outgoing)
             co_reachable = _closure(sinks[0], reverse)
-            for node in sorted(node_ids - (reachable & co_reachable)):
+            for node in sorted(node_ids - (reachable & co_reachable) - disconnected):
                 issues.append(
                     f"node '{node}' lies on no path from the start place to "
                     "the end place; every node must lie on such a path"
