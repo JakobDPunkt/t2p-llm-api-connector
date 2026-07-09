@@ -46,8 +46,7 @@ Please generate a BPMN model for the following description:
 
 {{PROCESS_TEXT}}
 
-STRICT JSON REMINDER: return exactly one valid JSON object only.
-Do not use markdown fences, code blocks, explanations, or extra text.
+{{STRICT_JSON_REMINDER}}
 
 Return only a JSON object with this structure:
 {
