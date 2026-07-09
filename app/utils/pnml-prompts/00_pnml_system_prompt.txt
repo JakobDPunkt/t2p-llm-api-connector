@@ -27,6 +27,7 @@ FROM TEXT TO NET:
 - The arc counts alone carry these roles: a transition with exactly one incoming and one outgoing arc is a plain activity.
 - A split or join sits on the transition of the adjacent activity where the description has one; otherwise insert a transition without a <name>, which only routes the flow.
 - A repetition (again/until) is an arc from a transition back to the place where the repeated part starts.
+- Several possible endings (approved/rejected, success/failure, different outcomes) still share the one end place: every final transition points to it. Which ending occurred is shown by which transition fired, not by a separate end place.
 - Between two consecutive activities there is always a place. Model only what the description says.
 
 METHOD:
@@ -77,6 +78,7 @@ BRANCHES:
 - "während gleichzeitig": parallel work, split on transition t_antrag_einreichen, 2 outgoing arcs
 - "danach": the parallel branches join on transition t_ergebnis_dokumentieren, 2 incoming arcs
 - "bei Genehmigung ... andernfalls": exclusive choice on place p_dokumentiert, 2 outgoing arcs
+- two outcomes, one ending: t_bestaetigung_senden and t_ablehnung_senden both point to the single p_end
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
