@@ -133,9 +133,16 @@ def _run_async_generate(app, job_id, api_key, data):
 # can relay 4xx client errors unchanged.
 
 
-def _v2_error(status_code, code, message):
-    """Build the standard connector error body and status tuple."""
-    return jsonify({"error": {"code": code, "message": message}}), status_code
+def _v2_error(status_code, code, message, details=None):
+    """Build the standard connector error body and status tuple.
+
+    ``details`` is an optional list of extra diagnostic strings, surfaced by
+    the demo's error banner (contract: ``{"error": {code, message, details?}}``).
+    """
+    error = {"code": code, "message": message}
+    if details:
+        error["details"] = details
+    return jsonify({"error": error}), status_code
 
 
 def _extract_bearer_key():

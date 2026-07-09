@@ -305,6 +305,27 @@ const PnmlRenderer = {
 const LIVE_BASE = "https://woped.dhbw-karlsruhe.de/t2p-2.0";
 const TIMEOUT_MS = 180000;
 
+/** "1 issue" / "3 issues" without the (s) shorthand. */
+function plural(n, word) {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/** Distil the direct backend's attempt history into the numbers the result
+ *  head and report banner need: what the model got wrong on its first,
+ *  unaided attempt, how many correction passes ran, and what was delivered.
+ *  Returns null for the pipeline (no attempt history). */
+function generationReport(history) {
+  if (!history || !Array.isArray(history.attempts) || !history.attempts.length) {
+    return null;
+  }
+  const attempts = history.attempts;
+  return {
+    firstIssues: attempts[0].issues || [],
+    deliveredIssues: attempts[history.deliveredIndex].issues || [],
+    corrections: attempts.length - 1,
+  };
+}
+
 const Api = {
   modesInfo: {
     direct: { label: "Direct PNML" },
@@ -318,7 +339,9 @@ const Api = {
     try {
       // Relative same-origin path so the page also works behind a
       // path-prefix reverse proxy (resolved against /demo).
-      const url = mode === "direct" ? "generate_pnml_direct" : LIVE_BASE + "/v2/generate/pnml";
+      // debug=1 asks the direct backend for the full attempt history (JSON)
+      // instead of bare PNML, so the page can show the model's first shot.
+      const url = mode === "direct" ? "generate_pnml_direct?debug=1" : LIVE_BASE + "/v2/generate/pnml";
       const body = mode === "direct"
         ? { user_text: text, provider, model }
         : { text, provider, model };
@@ -336,10 +359,12 @@ const Api = {
         throw Object.assign(new Error(await this.errorMessage(response, mode)), { ms });
       }
       if (mode === "direct") {
-        const pnml = await response.text();
-        const issuesHeader = response.headers.get("X-Validation-Issues") || "";
-        const issues = issuesHeader ? issuesHeader.split("; ").filter(Boolean) : [];
-        return { pnml, issues, ms };
+        // Debug contract: {pnml, delivered_index, attempts:[{issues, counts}]}.
+        const payload = await response.json();
+        const attempts = Array.isArray(payload.attempts) ? payload.attempts : [];
+        const deliveredIndex = payload.delivered_index || 0;
+        const issues = (attempts[deliveredIndex] || {}).issues || [];
+        return { pnml: payload.pnml, issues, ms, history: { attempts, deliveredIndex } };
       }
       const payload = await response.json();
       if (!payload || typeof payload.result !== "string") {
@@ -375,7 +400,7 @@ const Api = {
       if (err && err.message) {
         message = err.message;
         if (Array.isArray(err.details) && err.details.length) {
-          message += ": " + err.details.join("; ");
+          message += ". " + err.details.join(". ");
         }
       }
     } catch { /* non-JSON error page (e.g. proxy 502): keep the status text */ }
@@ -650,7 +675,7 @@ const App = {
     this.setActionsEnabled(side, false);
     this.showRunning(side, settings);
     try {
-      const { pnml, issues, ms } = await Api.generate(settings.mode, settings);
+      const { pnml, issues, ms, history } = await Api.generate(settings.mode, settings);
       let net;
       try {
         net = PnmlParser.parse(pnml);
@@ -661,18 +686,16 @@ const App = {
         parseErr.ms = ms; // keep the measured request time on parse failures
         throw parseErr;
       }
-      const autoLaidOut = !AutoLayout.fullyPositioned(net);
-      if (autoLaidOut) AutoLayout.apply(net);
+      if (!AutoLayout.fullyPositioned(net)) AutoLayout.apply(net);
       this.results[side] = { pnml, settings };
       this.stopTimer(side);
+      const report = generationReport(history);
       this.renderResultHead(side, settings, {
         ms,
         stats: `${net.places.length} places, ${net.transitions.length} transitions, ${net.arcs.length} arcs`,
-        layout: autoLaidOut ? "client auto-layout" : "backend layout",
+        report,
       });
-      if (issues.length) {
-        this.setBanner(side, "warn", issues);
-      }
+      this.setReportBanner(side, report, issues);
       PnmlRenderer.render(
         this.resultCard(side).querySelector(".canvas"), net, `arrow-${side}`
       );
@@ -704,33 +727,76 @@ const App = {
     this.timers[side] = null;
   },
 
-  renderResultHead(side, settings, { ms, stats, layout } = {}) {
+  renderResultHead(side, settings, { ms, stats, report } = {}) {
     const head = this.resultCard(side).querySelector(".result-head");
     head.innerHTML = "";
+
+    // Card identity is the backend under test. Provider, model and layout are
+    // fixed in the settings above, so they are not repeated as badges; the
+    // provider/model pair stays available on hover.
+    const title = document.createElement("span");
+    title.className = "result-title";
+    title.textContent = Api.modesInfo[settings.mode].label;
+    title.title = `${settings.provider} / ${settings.model}`;
+    head.appendChild(title);
+
     const add = (cls, text) => {
       const span = document.createElement("span");
       span.className = "badge " + cls;
       span.textContent = text;
       head.appendChild(span);
     };
-    const modeText = `${Api.modesInfo[settings.mode].label} (${settings.provider}/${settings.model})`;
-    add("mode", modeText);
-    head.firstChild.title = modeText; // full value on hover if ellipsized
     if (typeof ms === "number") add("time", (ms / 1000).toFixed(1) + " s");
     if (stats) add("stat", stats);
-    if (layout) add("layout", layout);
+
+    // Generation quality (direct backend only). One badge, consistently
+    // phrased; the detail of what went wrong lives in the report banner.
+    if (report) {
+      if (report.firstIssues.length === 0) {
+        add("ok", "valid");
+      } else if (report.deliveredIssues.length === 0) {
+        add("ok", "corrected");
+      } else {
+        add("warn", `${plural(report.deliveredIssues.length, "issue")} unresolved`);
+      }
+    }
   },
 
-  setBanner(side, kind, items = []) {
+  /** Show what the direct backend's generation actually did: the delivered
+   *  net's remaining problems, or — when the correction loop cleaned them up —
+   *  what the model's first attempt got wrong. Both are things the structural
+   *  validator can see; a clean first attempt shows no banner. */
+  setReportBanner(side, report, deliveredIssues) {
+    // Pipeline (no attempt history): only surface remaining issues, if any.
+    if (!report) {
+      this.setBanner(side, deliveredIssues.length ? "warn" : null, deliveredIssues);
+      return;
+    }
+    if (report.deliveredIssues.length) {
+      this.setBanner(
+        side, "warn", report.deliveredIssues,
+        `${plural(report.deliveredIssues.length, "issue")} unresolved`
+      );
+    } else if (report.firstIssues.length) {
+      this.setBanner(
+        side, "info", report.firstIssues,
+        `${plural(report.firstIssues.length, "issue")} corrected`
+      );
+    } else {
+      this.setBanner(side, null);
+    }
+  },
+
+  setBanner(side, kind, items = [], summaryText) {
     const slot = this.resultCard(side).querySelector(".banner-slot");
     slot.innerHTML = "";
     if (!kind) return;
     const banner = document.createElement("div");
     banner.className = "banner " + kind;
-    if (kind === "warn") {
+    if (kind === "warn" || kind === "info") {
       const details = document.createElement("details");
       const summary = document.createElement("summary");
-      summary.textContent = `Validation issues (${items.length})`;
+      summary.textContent = summaryText || plural(items.length, "issue");
       details.appendChild(summary);
       const list = document.createElement("ul");
       for (const item of items) {
@@ -741,7 +807,7 @@ const App = {
       details.appendChild(list);
       banner.appendChild(details);
     } else {
-      banner.textContent = items.join(" — ");
+      banner.textContent = items.join(". ");
     }
     slot.appendChild(banner);
   },

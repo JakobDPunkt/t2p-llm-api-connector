@@ -3,8 +3,13 @@ import unittest
 from unittest.mock import patch
 
 from app import create_app
-from app.services.llm_service import EmptyResponseError, LLMService
-from app.services.pnml_validator import PnmlValidator
+from app.services.llm_service import (
+    EmptyResponseError,
+    LLMService,
+    PnmlAttempt,
+    PnmlGeneration,
+)
+from app.services.pnml_validator import NetCounts, PnmlValidator
 from config import BaseConfig, TestingConfig
 
 PT_NET_TYPE = "http://www.informatik.hu-berlin.de/top/pntd/ptNetb"
@@ -21,8 +26,8 @@ def _net(inner, net_type=PT_NET_TYPE):
     return f'<pnml><net id="noID" type="{net_type}">{inner}</net></pnml>'
 
 
-# The contract example: passes every validation level.
-VALID_NET = _net(
+# The contract example: normalized without changes, no structural issues.
+VALID_INNER = (
     '<place id="p1"><name><text>start</text></name>'
     "<initialMarking><text>1</text></initialMarking></place>"
     '<transition id="t1"><name><text>check order</text></name></transition>'
@@ -30,6 +35,43 @@ VALID_NET = _net(
     '<arc id="a1" source="p1" target="t1"/>'
     '<arc id="a2" source="t1" target="p2"/>'
 )
+VALID_NET = _net(VALID_INNER)
+
+# Nameless t2/t5 route the flow (AND-split / AND-join); only the 1-in/1-out
+# transitions t1, t3, t4 model activities and carry a label.
+AND_SPLIT_JOIN_NET = _net(
+    '<place id="p1"><name><text>start</text></name>'
+    "<initialMarking><text>1</text></initialMarking></place>"
+    '<transition id="t1"><name><text>check order</text></name></transition>'
+    '<place id="p2"/><transition id="t2"/><place id="p3"/><place id="p4"/>'
+    '<transition id="t3"><name><text>pack goods</text></name></transition>'
+    '<transition id="t4"><name><text>print invoice</text></name></transition>'
+    '<place id="p5"/><place id="p6"/><transition id="t5"/>'
+    '<place id="p7"><name><text>end</text></name></place>'
+    '<arc id="a1" source="p1" target="t1"/><arc id="a2" source="t1" target="p2"/>'
+    '<arc id="a3" source="p2" target="t2"/>'
+    '<arc id="a4" source="t2" target="p3"/><arc id="a5" source="t2" target="p4"/>'
+    '<arc id="a6" source="p3" target="t3"/><arc id="a7" source="p4" target="t4"/>'
+    '<arc id="a8" source="t3" target="p5"/><arc id="a9" source="t4" target="p6"/>'
+    '<arc id="a10" source="p5" target="t5"/><arc id="a11" source="p6" target="t5"/>'
+    '<arc id="a12" source="t5" target="p7"/>'
+)
+
+
+def _check(pnml):
+    return PnmlValidator().check(pnml)
+
+
+def _issues(pnml):
+    return _check(pnml).issues
+
+
+def _generation(pnml, issues=()):
+    """A single-attempt PnmlGeneration, for tests that mock out the service."""
+    attempt = PnmlAttempt(
+        pnml=pnml, issues=list(issues), stripped=[], counts=NetCounts(0, 0, 0)
+    )
+    return PnmlGeneration(attempts=[attempt], best_index=0)
 
 # A marked start place, so only the level under test reports issues.
 MARKED_START = (
@@ -56,21 +98,7 @@ class TestPnmlExtraction(unittest.TestCase):
         self.assertIsNone(LLMService._extract_pnml_document(None))
 
 
-class TestPnmlValidatorLevel0(unittest.TestCase):
-    def test_valid_xml_passes(self):
-        self.assertEqual(PnmlValidator().validate_pnml(VALID_NET), [])
-
-    def test_truncated_xml_is_reported(self):
-        issues = PnmlValidator().validate_pnml("<pnml><net id='n1'>")
-        self.assertEqual(len(issues), 1)
-        self.assertIn("not valid XML", issues[0])
-
-    def test_empty_output_is_reported(self):
-        for bad in ("", "   ", None):
-            issues = PnmlValidator().validate_pnml(bad)
-            self.assertEqual(len(issues), 1)
-            self.assertIn("not valid XML", issues[0])
-
+class TestRepairPrompt(unittest.TestCase):
     def test_repair_prompt_embeds_context(self):
         prompt = LLMService()._build_pnml_repair_prompt(
             "ship the order", PNML_DOC, ["arc a1 connects two places"]
@@ -80,23 +108,26 @@ class TestPnmlValidatorLevel0(unittest.TestCase):
         self.assertIn("arc a1 connects two places", prompt)
 
 
-class TestPnmlValidatorLevel1(unittest.TestCase):
+class TestPnmlGates(unittest.TestCase):
+    """Nothing can be said about a document that is not PNML at all."""
+
     def assert_issue(self, pnml, fragment):
-        issues = PnmlValidator().validate_pnml(pnml)
-        self.assertTrue(
-            any(fragment in issue for issue in issues),
-            f"expected an issue containing {fragment!r}, got: {issues}",
-        )
+        issues = _issues(pnml)
+        self.assertEqual(len(issues), 1, issues)
+        self.assertIn(fragment, issues[0])
 
-    def test_contract_example_passes(self):
-        self.assertEqual(PnmlValidator().validate_pnml(VALID_NET), [])
+    def test_contract_example_passes_untouched(self):
+        result = _check(VALID_NET)
+        self.assertEqual(result.issues, [])
+        self.assertEqual(result.stripped, [])
+        self.assertEqual(result.pnml, VALID_NET)
 
-    def test_namespaced_document_is_tolerated(self):
-        doc = VALID_NET.replace(
-            "<pnml>",
-            '<pnml xmlns="http://www.pnml.org/version-2009/grammar/pnml">',
-        )
-        self.assertEqual(PnmlValidator().validate_pnml(doc), [])
+    def test_truncated_xml_is_reported(self):
+        self.assert_issue("<pnml><net id='n1'>", "not valid XML")
+
+    def test_empty_output_is_reported(self):
+        for bad in ("", "   ", None):
+            self.assert_issue(bad, "not valid XML")
 
     def test_wrong_root_element(self):
         self.assert_issue("<foo/>", "root element must be <pnml>")
@@ -105,28 +136,102 @@ class TestPnmlValidatorLevel1(unittest.TestCase):
         self.assert_issue("<pnml/>", "exactly one <net>")
         self.assert_issue("<pnml><net/><net/></pnml>", "exactly one <net>")
 
-    def test_net_requires_id_and_ptnetb_type(self):
-        self.assert_issue(
-            f'<pnml><net type="{PT_NET_TYPE}"><place id="p1"/></net></pnml>',
-            "missing its 'id'",
-        )
-        self.assert_issue(_net('<place id="p1"/>', net_type="x"), "type must be")
+    def test_a_gated_document_is_returned_unchanged(self):
+        self.assertEqual(_check("<foo/>").pnml, "<foo/>")
 
-    def test_forbidden_elements_are_reported(self):
-        self.assert_issue(
-            _net('<place id="p1"><graphics/></place>'),
-            "forbidden element <graphics>",
+    def test_namespaced_document_is_tolerated(self):
+        doc = VALID_NET.replace(
+            "<pnml>",
+            '<pnml xmlns="http://www.pnml.org/version-2009/grammar/pnml">',
         )
-        self.assert_issue(
-            _net('<transition id="t1"><toolspecific tool="WoPeD"/></transition>'),
-            "forbidden element <toolspecific>",
-        )
+        self.assertEqual(_issues(doc), [])
 
-    def test_unexpected_net_child_is_reported(self):
-        self.assert_issue(
+
+class TestPnmlNormalization(unittest.TestCase):
+    """Deterministic clean-up: recorded in `stripped`, never an issue."""
+
+    def assert_stripped(self, pnml, fragment):
+        result = _check(pnml)
+        self.assertTrue(
+            any(fragment in entry for entry in result.stripped),
+            f"expected a clean-up containing {fragment!r}, got: {result.stripped}",
+        )
+        return result
+
+    def test_semantics_free_elements_are_removed(self):
+        for element, markup in (
+            ("graphics", '<place id="p1"><graphics/></place>'),
+            ("toolspecific", '<transition id="t1"><toolspecific tool="WoPeD"/></transition>'),
+            ("inscription", '<arc id="a1" source="p1" target="t1"><inscription/></arc>'),
+        ):
+            result = self.assert_stripped(_net(markup), f"removed 1 <{element}>")
+            self.assertNotIn(element, result.pnml)
+
+    def test_page_container_is_unwrapped_keeping_its_children(self):
+        # Dropping <page> instead of unwrapping it would delete the whole net.
+        result = self.assert_stripped(
+            _net(f'<page id="pg1">{VALID_INNER}</page>'), "unwrapped 1 <page>"
+        )
+        self.assertEqual(result.issues, [])
+        self.assertNotIn("page", result.pnml)
+
+    def test_unexpected_net_child_is_removed(self):
+        result = self.assert_stripped(
             _net('<name><text>my net</text></name><place id="p1"/>'),
-            "unexpected element <name> under <net>",
+            "unexpected element(s) under <net> (name)",
         )
+        self.assertNotIn("my net", result.pnml)
+
+    def test_net_id_and_type_are_normalized(self):
+        self.assert_stripped(
+            f'<pnml><net type="{PT_NET_TYPE}"><place id="p1"/></net></pnml>',
+            "'id' attribute to 'noID'",
+        )
+        result = self.assert_stripped(
+            _net('<place id="p1"/>', net_type="x"), "'type' attribute"
+        )
+        self.assertIn(PT_NET_TYPE, result.pnml)
+
+    def test_empty_place_name_is_removed(self):
+        # Intermediate places may be nameless, so an empty <name> is noise.
+        result = self.assert_stripped(
+            _net('<place id="p1"><name/></place>'), "empty <name> element(s)"
+        )
+        self.assertNotIn("<name", result.pnml)
+
+    def test_normalization_never_hides_a_structural_issue(self):
+        doc = VALID_NET.replace(
+            '<transition id="t1">', '<transition id="t1"><graphics/>'
+        ).replace("<initialMarking><text>1</text></initialMarking>", "")
+        result = _check(doc)
+        self.assertTrue(any("<graphics>" in s for s in result.stripped))
+        self.assertTrue(any("<initialMarking>" in i for i in result.issues))
+
+
+class TestPnmlStructure(unittest.TestCase):
+    """The workflow-net invariants. Only these warrant a correction pass."""
+
+    def assert_issue(self, pnml, fragment):
+        issues = _issues(pnml)
+        self.assertTrue(
+            any(fragment in issue for issue in issues),
+            f"expected an issue containing {fragment!r}, got: {issues}",
+        )
+
+    def test_activity_transition_without_a_label_is_reported(self):
+        # An unlabelled 1-in/1-out transition models an unnamed activity.
+        # Both the missing and the empty <name> count as unlabelled.
+        for unlabelled in ('<transition id="t1"/>', '<transition id="t1"><name/></transition>'):
+            doc = VALID_NET.replace(
+                '<transition id="t1"><name><text>check order</text></name></transition>',
+                unlabelled,
+            )
+            self.assert_issue(doc, "transition 't1' has one incoming and one outgoing")
+
+    def test_nameless_routing_transitions_are_allowed(self):
+        # Per the system prompt the arc counts carry the split/join role, so a
+        # pure routing transition needs no label.
+        self.assertEqual(_issues(AND_SPLIT_JOIN_NET), [])
 
     def test_ids_required_and_unique(self):
         self.assert_issue(_net("<place/>"), "<place> without 'id'")
@@ -136,20 +241,6 @@ class TestPnmlValidatorLevel1(unittest.TestCase):
 
     def test_arc_requires_source_and_target(self):
         self.assert_issue(_net('<arc id="a1" source="p1"/>'), "missing its 'source' or 'target'")
-
-    def test_empty_name_text_is_reported(self):
-        self.assert_issue(
-            _net('<place id="p1"><name/></place>'),
-            "must contain a non-empty <text>",
-        )
-
-class TestPnmlValidatorLevel2(unittest.TestCase):
-    def assert_issue(self, pnml, fragment):
-        issues = PnmlValidator().validate_pnml(pnml)
-        self.assertTrue(
-            any(fragment in issue for issue in issues),
-            f"expected an issue containing {fragment!r}, got: {issues}",
-        )
 
     def test_unresolved_arc_reference(self):
         self.assert_issue(
@@ -237,26 +328,14 @@ class TestPnmlValidatorLevel2(unittest.TestCase):
         )
         self.assert_issue(doc, "'t2' lies on no path")
 
-    def test_local_and_graph_issues_are_reported_together(self):
-        # A forbidden element must not hide graph findings (and vice versa).
-        doc = VALID_NET.replace(
-            '<transition id="t1">',
-            '<transition id="t1"><graphics/>',
-        ).replace(
-            "<initialMarking><text>1</text></initialMarking>", ""
-        )
-        issues = PnmlValidator().validate_pnml(doc)
-        self.assertTrue(any("forbidden element <graphics>" in i for i in issues))
-        self.assertTrue(any("<initialMarking>" in i for i in issues))
-
-    def test_graph_prerequisites_gate_level_2(self):
-        # A duplicate id makes the graph ill-defined; level-2 findings would
+    def test_graph_prerequisites_gate_the_graph_checks(self):
+        # A duplicate id makes the graph ill-defined; the graph findings would
         # be artifacts and must be suppressed.
         doc = _net(
             '<place id="x"/><transition id="x"/>'
             '<arc id="a1" source="x" target="x"/>'
         )
-        issues = PnmlValidator().validate_pnml(doc)
+        issues = _issues(doc)
         self.assertTrue(any("duplicate id 'x'" in i for i in issues))
         self.assertFalse(any("itself" in i for i in issues))
 
@@ -286,25 +365,26 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         with patch.object(
             LLMService, "_openai_generate_once", side_effect=mock_once
         ) as mocked:
-            pnml, issues = self.service.generate_pnml(
+            generation = self.service.generate_pnml(
                 api_key="test-key",
                 provider="openai",
                 model="gpt-4o",
                 user_text="ship the order",
                 system_prompt="prompt under test",
             )
-        return pnml, issues, mocked
+        return generation, mocked
 
     def test_valid_first_attempt_needs_no_correction(self):
-        pnml, issues, mocked = self._generate([VALID_NET])
-        self.assertEqual(issues, [])
+        generation, mocked = self._generate([VALID_NET])
+        self.assertEqual(generation.best.issues, [])
         self.assertEqual(mocked.call_count, 1)
+        self.assertEqual(len(generation.attempts), 1)
 
     def test_correction_fixes_the_document(self):
-        pnml, issues, mocked = self._generate(
+        generation, mocked = self._generate(
             [_with_duplicate_arc("a3"), VALID_NET]
         )
-        self.assertEqual(issues, [])
+        self.assertEqual(generation.best.issues, [])
         self.assertEqual(mocked.call_count, 2)
         # The correction prompt carries the previous document and the issue.
         correction_prompt = mocked.call_args_list[1].args[3]
@@ -313,10 +393,10 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
 
     def test_identical_issues_stop_the_loop(self):
         broken = _with_duplicate_arc("a3")
-        pnml, issues, mocked = self._generate([broken, broken, broken])
+        generation, mocked = self._generate([broken, broken, broken])
         # Initial call plus one correction; the identical result stops it.
         self.assertEqual(mocked.call_count, 2)
-        self.assertEqual(len(issues), 1)
+        self.assertEqual(len(generation.best.issues), 1)
 
     def test_budget_is_one_generation_plus_three_corrections(self):
         replies = [
@@ -326,16 +406,19 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
             _with_duplicate_arc("a6"),
             _with_duplicate_arc("a7"),
         ]
-        pnml, issues, mocked = self._generate(replies)
+        generation, mocked = self._generate(replies)
         self.assertEqual(mocked.call_count, 4)
-        self.assertEqual(len(issues), 1)
+        self.assertEqual(len(generation.attempts), 4)
+        self.assertEqual(len(generation.best.issues), 1)
 
     def test_correction_without_pnml_keeps_previous_attempt(self):
         broken = _with_duplicate_arc("a3")
-        pnml, issues, mocked = self._generate([broken, "no xml in here"])
+        generation, mocked = self._generate([broken, "no xml in here"])
         self.assertEqual(mocked.call_count, 2)
-        self.assertIn(broken, pnml)
-        self.assertEqual(len(issues), 1)
+        self.assertIn(broken, generation.best.pnml)
+        self.assertEqual(len(generation.best.issues), 1)
+        # The unusable reply is not an attempt: nothing was validated.
+        self.assertEqual(len(generation.attempts), 1)
 
     def test_best_attempt_with_fewest_issues_is_delivered(self):
         two_issues = VALID_NET.replace(
@@ -349,24 +432,58 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         )
         one_issue = _with_duplicate_arc("a4")
         # 2 issues -> 1 issue -> identical (stop); the 1-issue attempt wins.
-        pnml, issues, mocked = self._generate([two_issues, one_issue, one_issue])
+        generation, mocked = self._generate([two_issues, one_issue, one_issue])
         self.assertEqual(mocked.call_count, 3)
-        self.assertEqual(len(issues), 1)
-        self.assertIn('id="a4"', pnml)
+        self.assertEqual(generation.best_index, 1)
+        self.assertEqual(len(generation.best.issues), 1)
+        self.assertIn('id="a4"', generation.best.pnml)
+
+    def test_history_records_the_unaided_first_shot(self):
+        # The first attempt survives even though a later one is delivered.
+        generation, _ = self._generate([_with_duplicate_arc("a3"), VALID_NET])
+        first = generation.attempts[0]
+        self.assertEqual(len(first.issues), 1)
+        self.assertIn("duplicate arc", first.issues[0])
+        self.assertEqual(generation.best_index, 1)
+        self.assertEqual(generation.best.issues, [])
+
+    def test_history_records_normalization_and_net_size(self):
+        dirty = VALID_NET.replace('<transition id="t1">', '<transition id="t1"><graphics/>')
+        generation, mocked = self._generate([dirty])
+        first = generation.attempts[0]
+        # Cosmetics are stripped, so they cost no correction pass.
+        self.assertEqual(mocked.call_count, 1)
+        self.assertEqual(first.issues, [])
+        self.assertTrue(any("<graphics>" in entry for entry in first.stripped))
+        self.assertEqual(tuple(first.counts), (2, 1, 2))
+
+    def test_a_shrinking_correction_is_called_out(self):
+        # A transition without arcs is fixed by deleting it -- the loop accepts
+        # that (fewer issues), so the lost node must at least be logged.
+        stranded = VALID_NET.replace(
+            '<place id="p2"><name><text>end</text></name></place>',
+            '<place id="p2"><name><text>end</text></name></place>'
+            '<transition id="t9"><name><text>archive order</text></name></transition>',
+        )
+        with self.assertLogs("app.services.llm_service", level="WARNING") as logs:
+            generation, _ = self._generate([stranded, VALID_NET])
+        self.assertEqual(generation.attempts[0].counts.transitions, 2)
+        self.assertEqual(generation.best.counts.transitions, 1)
+        self.assertTrue(any("shrank the net" in line for line in logs.output))
 
     @patch("app.services.llm_service.genai")
     def test_gemini_provider_is_dispatched(self, mock_genai):
         with patch.object(
             LLMService, "_gemini_generate_once", side_effect=[VALID_NET]
         ) as mocked:
-            pnml, issues = self.service.generate_pnml(
+            generation = self.service.generate_pnml(
                 api_key="test-key",
                 provider="gemini",
                 model="gemini-2.0-flash",
                 user_text="ship the order",
                 system_prompt="prompt under test",
             )
-        self.assertEqual(issues, [])
+        self.assertEqual(generation.best.issues, [])
         mocked.assert_called_once()
         mock_genai.configure.assert_called_once_with(api_key="test-key")
 
@@ -445,7 +562,7 @@ class TestGeneratePnmlRoute(unittest.TestCase):
     @patch("app.api.routes.model_registry.is_valid", return_value=True)
     @patch(
         "app.api.pnml_routes._llm_service.generate_pnml",
-        return_value=(PNML_DOC, []),
+        return_value=_generation(PNML_DOC),
     )
     def test_valid_request_returns_pnml_as_xml(self, mock_generate, _valid, _refresh):
         response = self._post()
@@ -463,7 +580,7 @@ class TestGeneratePnmlRoute(unittest.TestCase):
     @patch("app.api.routes.model_registry.is_valid", return_value=True)
     @patch(
         "app.api.pnml_routes._llm_service.generate_pnml",
-        return_value=(PNML_DOC, ["transition 't9' has no inbound arc"]),
+        return_value=_generation(PNML_DOC, ["transition 't9' has no inbound arc"]),
     )
     def test_remaining_issues_are_reported_in_header(self, _gen, _valid, _refresh):
         response = self._post()
@@ -509,16 +626,16 @@ class TestGeneratePnmlRoute(unittest.TestCase):
 class TestPromptValidatorParity(unittest.TestCase):
     """The system prompt may never teach a format its own validation rejects:
     every PNML document embedded in the prompt (skeleton and examples) must
-    pass all validation levels."""
+    pass unchanged -- no structural issue, and nothing left to strip."""
 
     def test_every_prompt_document_passes_validation(self):
         prompt = BaseConfig.PNML_SYSTEM_PROMPT
         documents = re.findall(r"<pnml\b.*?</pnml>", prompt, re.DOTALL)
         self.assertGreaterEqual(len(documents), 3)
         for document in documents:
-            self.assertEqual(
-                PnmlValidator().validate_pnml(document), [], document[:100]
-            )
+            result = _check(document)
+            self.assertEqual(result.issues, [], document[:100])
+            self.assertEqual(result.stripped, [], document[:100])
 
 
 if __name__ == "__main__":

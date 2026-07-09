@@ -80,16 +80,24 @@
     border-radius: 999px; padding: 3px 10px; white-space: nowrap;
     max-width: 100%; overflow: hidden; text-overflow: ellipsis;
   }
-  .badge.mode { background: #e8edf9; color: var(--accent); }
+  .result-title { font-weight: 600; font-size: 14px; color: var(--ink); margin-right: 2px; }
   .badge.time { background: #eef1f4; color: var(--ink); font-variant-numeric: tabular-nums; }
   .badge.stat { background: #eef1f4; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .badge.layout { background: #f3eefa; color: #5b3d94; }
+  .badge.ok   { background: #eaf5ee; color: #2f6d43; }
+  .badge.warn { background: var(--warn-bg); color: var(--warn-ink); }
 
-  .banner { border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-bottom: 10px; overflow-wrap: anywhere; }
+  /* The banner floats over the top of the canvas so it never shifts the net
+     down: both result canvases keep the same top edge and stay side by side. */
+  .canvas-wrap { position: relative; }
+  .banner-slot { position: absolute; top: 8px; left: 8px; right: 8px; z-index: 5; }
+  .banner-slot:empty { display: none; }
+  .banner { border-radius: 8px; padding: 6px 10px; font-size: 12.5px; overflow-wrap: anywhere;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, .12); }
   .banner.warn { background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-ink); }
+  .banner.info { background: #eef2fb; border: 1px solid #cfd9f0; color: #2f4a86; }
   .banner.err  { background: var(--err-bg);  border: 1px solid var(--err-line);  color: var(--err-ink); }
   .banner summary { cursor: pointer; font-weight: 600; }
-  .banner ul { margin: 6px 0 0; padding-left: 18px; }
+  .banner ul { margin: 6px 0 0; padding-left: 18px; max-height: 220px; overflow: auto; }
 
   .canvas {
     position: relative;

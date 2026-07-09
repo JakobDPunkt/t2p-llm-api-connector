@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+from collections import namedtuple
 
 import google.generativeai as genai
 from flask import current_app
@@ -11,6 +12,27 @@ from app.services import model_registry
 from app.services.model_validator import ModelValidator
 from app.services.pnml_validator import PnmlValidator
 from app.utils.prompt_builder import PromptBuilder, STRICT_JSON_REMINDER
+
+#: One pass of the direct-PNML correction loop, after normalization.
+PnmlAttempt = namedtuple("PnmlAttempt", "pnml issues stripped counts")
+
+
+class PnmlGeneration(namedtuple("PnmlGeneration", "attempts best_index")):
+    """The full history of a direct-PNML generation.
+
+    ``attempts[0]`` is the model's unaided first shot, every further entry one
+    correction pass. Deriving the summary numbers from the raw history keeps
+    them consistent and costs no extra bookkeeping: the number of correction
+    passes is ``len(attempts) - 1``, the model's unaided quality is
+    ``attempts[0].issues``, and a correction that traded net structure for
+    validity shows up as shrinking ``counts``.
+    """
+
+    @property
+    def best(self):
+        """The delivered attempt: the one with the fewest remaining issues."""
+        return self.attempts[self.best_index]
+
 
 _PNML_BLOCK_RE = re.compile(r"<pnml\b.*?</pnml>", re.DOTALL | re.IGNORECASE)
 
@@ -31,7 +53,16 @@ logger = logging.getLogger(__name__)
 
 
 class EmptyResponseError(ValueError):
-    """Raised when the provider returns no usable completion text."""
+    """Raised when the provider returns no usable completion text.
+
+    ``raw_reply`` carries the provider's actual answer when it was non-empty
+    but held no PNML document, so callers can surface what the model wrote
+    instead of a bare "no PNML" message.
+    """
+
+    def __init__(self, *args, raw_reply=None):
+        super().__init__(*args)
+        self.raw_reply = raw_reply
 
 
 class LLMService:
@@ -689,10 +720,10 @@ class LLMService:
         call with the PNML system prompt and the raw user text — no
         PromptBuilder, no few-shot orchestration, no JSON handling.
 
-        Returns a ``(pnml, issues)`` tuple: the (best-effort) PNML document and
-        the list of validation issues remaining after correction. Per contract
-        the document is delivered even with remaining issues; the route exposes
-        them in the ``X-Validation-Issues`` response header.
+        Returns a :class:`PnmlGeneration`: the full attempt history plus the
+        index of the delivered one. Per contract the document is delivered even
+        with remaining issues; the route exposes them in the
+        ``X-Validation-Issues`` response header.
         """
         method_name = model_registry.dispatch_method(provider)
         if method_name == "call_openai":
@@ -737,38 +768,54 @@ class LLMService:
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
-        pnml = self._extract_pnml_document(generate_once(user_text))
-        if pnml is None:
-            raise EmptyResponseError("Provider reply contained no PNML document.")
-        issues = self.pnml_validator.validate_pnml(pnml, user_text)
+        def attempt(document):
+            """Normalize and validate one provider reply into a record."""
+            result = self.pnml_validator.check(document)
+            for entry in result.stripped:
+                logger.info("PNML normalization: %s", entry)
+            return PnmlAttempt(
+                pnml=result.pnml,
+                issues=result.issues,
+                stripped=result.stripped,
+                counts=result.counts,
+            )
+
+        reply = generate_once(user_text)
+        raw = self._extract_pnml_document(reply)
+        if raw is None:
+            raise EmptyResponseError(
+                "Provider reply contained no PNML document.", raw_reply=reply
+            )
 
         # Correction loop: up to _PNML_MAX_CORRECTIONS passes, each carrying
         # the previous document plus the combined issue list. Stops early
         # when a pass leaves the issues absolutely identical (no progress).
-        # The best attempt (fewest issues) is delivered per the best-effort
-        # contract; the route reports remaining issues in a response header.
-        best_pnml, best_issues = pnml, issues
+        # Cosmetic deviations never reach this loop -- the validator strips
+        # them deterministically, so no correction pass is spent on them.
+        # Every pass is recorded: the raw history is the only place where the
+        # model's unaided first shot, and any shrinkage along the way, survive.
+        attempts = [attempt(raw)]
+        best_index = 0
         previous_issues = None
-        corrections = 0
-        while issues and corrections < _PNML_MAX_CORRECTIONS:
-            if issues == previous_issues:
+        while attempts[-1].issues and len(attempts) <= _PNML_MAX_CORRECTIONS:
+            current = attempts[-1]
+            if current.issues == previous_issues:
                 logger.warning(
                     "PNML correction made no progress (identical issues); "
                     "stopping after %d correction(s)",
-                    corrections,
+                    len(attempts) - 1,
                 )
                 break
-            previous_issues = issues
+            previous_issues = current.issues
 
-            corrections += 1
             logger.info(
                 "PNML correction attempt %d/%d for %d issue(s)",
-                corrections,
+                len(attempts),
                 _PNML_MAX_CORRECTIONS,
-                len(issues),
+                len(current.issues),
             )
             repair_prompt = self._build_pnml_repair_prompt(
-                user_text, pnml, issues
+                user_text, current.pnml, current.issues
             )
             corrected = self._extract_pnml_document(generate_once(repair_prompt))
             if corrected is None:
@@ -778,17 +825,39 @@ class LLMService:
                 )
                 break
 
-            pnml = corrected
-            issues = self.pnml_validator.validate_pnml(pnml, user_text)
-            if len(issues) < len(best_issues):
-                best_pnml, best_issues = pnml, issues
+            attempts.append(attempt(corrected))
+            if len(attempts[-1].issues) < len(attempts[best_index].issues):
+                best_index = len(attempts) - 1
 
-        if best_issues:
+        return self._finish_pnml_generation(attempts, best_index)
+
+    @staticmethod
+    def _finish_pnml_generation(attempts, best_index):
+        """Log what the history reveals and wrap it into the result."""
+        first, best = attempts[0], attempts[best_index]
+
+        if best.issues:
             logger.warning(
                 "PNML validation found %d remaining issue(s) after %d "
                 "correction(s): %s",
-                len(best_issues),
-                corrections,
-                "; ".join(best_issues),
+                len(best.issues),
+                len(attempts) - 1,
+                "; ".join(best.issues),
             )
-        return best_pnml, best_issues
+
+        # Structural validity is bought with nodes: the correction loop selects
+        # the attempt with the fewest issues, and deleting a node is a cheap way
+        # to satisfy the validator. A net that shrank is the one failure mode
+        # the structural checks cannot see, so it is called out explicitly.
+        if best_index and (
+            best.counts.transitions < first.counts.transitions
+            or best.counts.places < first.counts.places
+        ):
+            logger.warning(
+                "PNML correction shrank the net: %s -> %s (places, transitions, "
+                "arcs); the delivered net may have lost part of the process",
+                tuple(first.counts),
+                tuple(best.counts),
+            )
+
+        return PnmlGeneration(attempts=attempts, best_index=best_index)

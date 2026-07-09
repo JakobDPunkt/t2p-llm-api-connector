@@ -17,7 +17,7 @@ import logging
 import time
 
 from flasgger import swag_from
-from flask import Response, current_app, request
+from flask import Response, current_app, jsonify, request
 from flask_cors import cross_origin
 
 from app.api import bp
@@ -34,6 +34,40 @@ from app.services import model_registry
 from app.services.llm_service import EmptyResponseError
 
 logger = logging.getLogger(__name__)
+
+#: How much of a non-PNML provider reply to surface in the debug view.
+_REPLY_EXCERPT_LIMIT = 500
+
+
+def _debug_requested():
+    """Whether the caller asked for the attempt-history JSON (demo only)."""
+    return request.args.get("debug") == "1"
+
+
+def _reply_excerpt(reply):
+    """A single-line, length-capped excerpt of a raw provider reply."""
+    if not reply:
+        return ""
+    collapsed = " ".join(str(reply).split())
+    if len(collapsed) <= _REPLY_EXCERPT_LIMIT:
+        return collapsed
+    return collapsed[:_REPLY_EXCERPT_LIMIT] + " […]"
+
+
+def _generation_debug_payload(generation):
+    """Serialize the full generation history for the demo's debug view.
+
+    ``attempts[0]`` is the model's unaided first shot; every further entry is
+    one correction pass. ``delivered_index`` marks which attempt was returned.
+    """
+    return {
+        "pnml": generation.best.pnml,
+        "delivered_index": generation.best_index,
+        "attempts": [
+            {"issues": list(a.issues), "counts": a.counts._asdict()}
+            for a in generation.attempts
+        ],
+    }
 
 
 @bp.route("/demo")
@@ -116,28 +150,42 @@ def generate_pnml():
             provider,
             model,
         )
-        pnml, issues = _llm_service.generate_pnml(
+        generation = _llm_service.generate_pnml(
             api_key=api_key,
             provider=provider,
             model=model,
             user_text=data["user_text"],
             system_prompt=current_app.config["PNML_SYSTEM_PROMPT"],
         )
-        response = Response(pnml, status=200, mimetype="application/xml")
-        if issues:
+        best = generation.best
+
+        # Debug view (demo only): the full attempt history as JSON, so the page
+        # can show the model's unaided first shot and what each correction pass
+        # changed. The default contract is unchanged -- pure application/xml.
+        if _debug_requested():
+            return jsonify(_generation_debug_payload(generation)), 200
+
+        response = Response(best.pnml, status=200, mimetype="application/xml")
+        if best.issues:
             # Best-effort delivery per contract: the body stays pure PNML,
             # remaining validation issues travel in the header.
-            response.headers["X-Validation-Issues"] = "; ".join(issues)
+            response.headers["X-Validation-Issues"] = "; ".join(best.issues)
         return response
 
     except Exception as e:
         if isinstance(e, EmptyResponseError):
             status = "400"
-            logger.warning("/generate_pnml_direct rejected provider response: %s", e)
+            excerpt = _reply_excerpt(getattr(e, "raw_reply", None))
+            logger.warning(
+                "/generate_pnml_direct rejected provider response: %s (reply: %s)",
+                e,
+                excerpt or "<empty>",
+            )
             return _v2_error(
                 400,
                 "invalid_request",
                 "The LLM provider returned no usable PNML document.",
+                details=[f"Provider reply: {excerpt}"] if excerpt else None,
             )
 
         if _is_quota_error(e):
