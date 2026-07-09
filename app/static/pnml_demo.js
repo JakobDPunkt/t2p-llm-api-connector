@@ -796,39 +796,34 @@ const App = {
       ? `${plural(left.length, "issue")} unresolved after ${plural(corrections, "pass")}`
       : `${plural(firstIssues.length, "issue")} corrected over ${plural(corrections, "pass")}`;
 
-    // A collapsible timeline: the first attempt's issues, then what each
-    // correction pass fixed (its predecessor's issues minus its own) and how
-    // many it left. This shows which pass resolved what.
+    // A collapsible timeline: for each stage (first attempt, then each retry)
+    // the issues that were still open after it. No cross-stage diffing.
     const banner = document.createElement("div");
     banner.className = "banner " + kind;
     const root = document.createElement("details");
     root.appendChild(this._summaryEl(summary));
 
-    const list = (items) => {
-      const ul = document.createElement("ul");
-      for (const it of items) {
-        const li = document.createElement("li");
-        li.textContent = it;
-        ul.appendChild(li);
+    passes.forEach((remaining, i) => {
+      const label = i === 0 ? "First attempt" : `Retry ${i}`;
+      const tag = i === deliveredIndex ? " (delivered)" : "";
+      const stage = document.createElement("details");
+      stage.className = "pass";
+      stage.appendChild(this._summaryEl(
+        remaining.length
+          ? `${label}${tag}: ${plural(remaining.length, "issue")} left`
+          : `${label}${tag}: none left`
+      ));
+      if (remaining.length) {
+        const ul = document.createElement("ul");
+        for (const it of remaining) {
+          const li = document.createElement("li");
+          li.textContent = it;
+          ul.appendChild(li);
+        }
+        stage.appendChild(ul);
       }
-      return ul;
-    };
-    const pass = (title, items) => {
-      const d = document.createElement("details");
-      d.className = "pass";
-      d.appendChild(this._summaryEl(title));
-      d.appendChild(list(items.length ? items : ["(no change)"]));
-      root.appendChild(d);
-    };
-
-    pass(`First attempt: ${plural(firstIssues.length, "issue")}`, firstIssues);
-    for (let k = 1; k < passes.length; k++) {
-      const fixed = passes[k - 1].filter((i) => !passes[k].includes(i));
-      const tag = k === deliveredIndex ? " (delivered)" : "";
-      const remaining = passes[k].length;
-      pass(`Pass ${k}${tag}: fixed ${fixed.length}, ${remaining} left`, fixed);
-    }
-    if (left.length) pass(`Still open: ${plural(left.length, "issue")}`, left);
+      root.appendChild(stage);
+    });
 
     banner.appendChild(root);
     slot.appendChild(banner);
