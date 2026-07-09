@@ -31,13 +31,13 @@ FROM TEXT TO NET:
 - Between two consecutive activities there is always a place. Model only what the description says.
 
 METHOD:
-Nothing in the finished XML says whether a branch point is a choice or parallel work — that follows only from whether the branching node is a place or a transition. So decide it before you write any arc.
+Plan in two lists before the document, so no activity is dropped and no branch mislabelled.
 
-First list every branch point under the heading BRANCHES, one line each:
-- the cue from the description that justifies it,
-- whether it is an exclusive choice or parallel work,
-- the node that carries it, named by its id.
-Then write the document, following your own list.
+First list the activities the description mentions under ACTIVITIES, one verb-object label per line. This is the checklist the net must cover; routing-only steps are not activities and do not belong here.
+
+Then list every branch point under BRANCHES, one line each: the cue that justifies it, whether it is an exclusive choice or parallel work, and the node that carries it (by id). Deciding this before writing arcs settles the choice-versus-parallel distinction, which the finished XML never states.
+
+Then write the document: give every entry in your ACTIVITIES list its own transition and follow your BRANCHES list. Before you finish, check every listed activity has a transition.
 
 STYLE:
 - Activity transitions carry a concise verb-object label in the language of the description. Routing transitions and intermediate places need no name.
@@ -47,6 +47,11 @@ EXAMPLES (they illustrate the mapping; always model the actual description):
 
 Description: "A customer reports an issue. The issue is analyzed. If a solution is found it is resolved, otherwise it is escalated and analyzed again."
 Answer:
+ACTIVITIES:
+- report issue
+- analyze issue
+- resolve issue
+- escalate issue
 BRANCHES:
 - "if a solution is found ... otherwise": exclusive choice on place p_analyzed, 2 outgoing arcs
 - "analyzed again": repetition, arc from t_escalate_issue back to p_reported
@@ -74,6 +79,13 @@ BRANCHES:
 
 Description: "Ein Mitarbeiter reicht einen Urlaubsantrag ein. Die Personalabteilung prüft den Antrag, während gleichzeitig das Zeitkonto aktualisiert wird. Danach wird das Ergebnis dokumentiert. Bei Genehmigung erhält der Mitarbeiter eine Bestätigung, andernfalls eine Ablehnung."
 Answer:
+ACTIVITIES:
+- urlaubsantrag einreichen
+- antrag prüfen
+- zeitkonto aktualisieren
+- ergebnis dokumentieren
+- bestätigung senden
+- ablehnung senden
 BRANCHES:
 - "während gleichzeitig": parallel work, split on transition t_antrag_einreichen, 2 outgoing arcs
 - "danach": the parallel branches join on transition t_ergebnis_dokumentieren, 2 incoming arcs
@@ -114,6 +126,10 @@ BRANCHES:
 
 Description: "Simultaneously, the goods are packed and the invoice is created. Afterwards the parcel is shipped."
 Answer:
+ACTIVITIES:
+- pack goods
+- create invoice
+- ship parcel
 BRANCHES:
 - "simultaneously": parallel work at the very start, no activity precedes it, so a routing transition t_split carries it, 2 outgoing arcs
 - "afterwards": the parallel branches join on transition t_ship_parcel, 2 incoming arcs
@@ -143,4 +159,4 @@ BRANCHES:
 </net>
 </pnml>
 
-Reply with the BRANCHES list, then exactly one well-formed PNML XML document, and nothing else.
+Reply with the ACTIVITIES list, the BRANCHES list, then exactly one well-formed PNML XML document, and nothing else.
