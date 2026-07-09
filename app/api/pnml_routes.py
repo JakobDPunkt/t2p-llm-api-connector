@@ -53,18 +53,30 @@ def _reply_excerpt(reply):
     return collapsed[:_REPLY_EXCERPT_LIMIT] + " […]"
 
 
+def _tokens(usage):
+    """Serialize a ``TokenUsage``, or None when the provider reported none."""
+    return usage._asdict() if usage else None
+
+
 def _generation_debug_payload(generation):
     """Serialize the full generation history for the demo's debug view.
 
     ``attempts[0]`` is the model's unaided first shot; every further entry is
     one correction pass. ``delivered_index`` marks which attempt was returned.
+    The top-level ``tokens`` cover every provider call, so they can exceed the
+    sum of the per-attempt ones.
     """
     return {
         "pnml": generation.best.pnml,
         "delivered_index": generation.best_index,
+        "tokens": _tokens(generation.tokens),
         "attempts": [
-            {"issues": list(a.issues), "counts": a.counts._asdict()}
-            for a in generation.attempts
+            {
+                "issues": list(a.issues),
+                "counts": a.counts._asdict(),
+                "tokens": _tokens(generation.usage_for(i)),
+            }
+            for i, a in enumerate(generation.attempts)
         ],
     }
 

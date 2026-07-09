@@ -314,9 +314,17 @@ function plural(n, word, many = word + "s") {
   return `${n} ${n === 1 ? word : many}`;
 }
 
+/** Token counts at a glance: 812, 3.2k, 41k. */
+function formatTokens(n) {
+  if (n < 1000) return String(n);
+  const thousands = n / 1000;
+  return (thousands < 10 ? thousands.toFixed(1) : Math.round(thousands)) + "k";
+}
+
 /** Distil the direct backend's attempt history into the numbers the result
  *  head and report banner need: what the model got wrong on its first,
- *  unaided attempt, how many correction passes ran, and what was delivered.
+ *  unaided attempt, how many correction passes ran, what was delivered, and
+ *  what it all cost in tokens.
  *  Returns null for the pipeline (no attempt history). */
 function generationReport(history) {
   if (!history || !Array.isArray(history.attempts) || !history.attempts.length) {
@@ -325,6 +333,9 @@ function generationReport(history) {
   const passes = history.attempts.map((a) => a.issues || []);
   return {
     passes,                       // issues remaining after each attempt (0 = first)
+    // Absent, not zero, whenever the provider reported no usage.
+    passTokens: history.attempts.map((a) => a.tokens || null),
+    tokens: history.tokens || null,
     deliveredIndex: history.deliveredIndex,
     firstIssues: passes[0],
     deliveredIssues: passes[history.deliveredIndex],
@@ -367,12 +378,18 @@ const Api = {
         throw Object.assign(new Error(await this.errorMessage(response, mode)), { ms });
       }
       if (mode === "direct") {
-        // Debug contract: {pnml, delivered_index, attempts:[{issues, counts}]}.
+        // Debug contract:
+        // {pnml, delivered_index, tokens, attempts:[{issues, counts, tokens}]}.
         const payload = await response.json();
         const attempts = Array.isArray(payload.attempts) ? payload.attempts : [];
         const deliveredIndex = payload.delivered_index || 0;
         const issues = (attempts[deliveredIndex] || {}).issues || [];
-        return { pnml: payload.pnml, issues, ms, history: { attempts, deliveredIndex } };
+        return {
+          pnml: payload.pnml,
+          issues,
+          ms,
+          history: { attempts, deliveredIndex, tokens: payload.tokens },
+        };
       }
       const payload = await response.json();
       if (!payload || typeof payload.result !== "string") {
@@ -748,14 +765,22 @@ const App = {
     title.title = `${settings.provider} / ${settings.model}`;
     head.appendChild(title);
 
-    const add = (cls, text) => {
+    const add = (cls, text, hover) => {
       const span = document.createElement("span");
       span.className = "badge " + cls;
       span.textContent = text;
+      if (hover) span.title = hover;
       head.appendChild(span);
     };
     if (typeof ms === "number") add("time", (ms / 1000).toFixed(1) + " s");
     if (stats) add("stat", stats);
+
+    // The whole generation, correction passes included (direct backend only;
+    // the live pipeline reports no tokens).
+    if (report && report.tokens) {
+      const { input, output, total } = report.tokens;
+      add("stat", `${formatTokens(total)} tokens`, `${input} in + ${output} out`);
+    }
 
     // Generation quality (direct backend only), then how much correcting it
     // took. Quality is one badge, consistently phrased; the detail of what
@@ -788,7 +813,7 @@ const App = {
       this.setBanner(side, deliveredIssues.length ? "warn" : null, deliveredIssues);
       return;
     }
-    const { passes, deliveredIndex, firstIssues, deliveredIssues: left, corrections } = report;
+    const { passes, passTokens, deliveredIndex, firstIssues, deliveredIssues: left, corrections } = report;
     if (!firstIssues.length) return; // clean first attempt, nothing to report
 
     const kind = left.length ? "warn" : "info";
@@ -806,12 +831,14 @@ const App = {
     passes.forEach((remaining, i) => {
       const label = i === 0 ? "First attempt" : `Retry ${i}`;
       const tag = i === deliveredIndex ? " (delivered)" : "";
+      const spent = passTokens[i];
+      const cost = spent ? ` · ${formatTokens(spent.total)} tokens` : "";
       const stage = document.createElement("details");
       stage.className = "pass";
       stage.appendChild(this._summaryEl(
-        remaining.length
+        (remaining.length
           ? `${label}${tag}: ${plural(remaining.length, "issue")} left`
-          : `${label}${tag}: none left`
+          : `${label}${tag}: none left`) + cost
       ));
       if (remaining.length) {
         const ul = document.createElement("ul");

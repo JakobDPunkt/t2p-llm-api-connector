@@ -1,5 +1,6 @@
 import re
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import create_app
@@ -8,6 +9,10 @@ from app.services.llm_service import (
     LLMService,
     PnmlAttempt,
     PnmlGeneration,
+    TokenUsage,
+    _gemini_token_usage,
+    _openai_token_usage,
+    _sum_token_usage,
 )
 from app.services.pnml_validator import NetCounts, PnmlValidator
 from config import BaseConfig, TestingConfig
@@ -66,12 +71,12 @@ def _issues(pnml):
     return _check(pnml).issues
 
 
-def _generation(pnml, issues=()):
+def _generation(pnml, issues=(), usages=()):
     """A single-attempt PnmlGeneration, for tests that mock out the service."""
     attempt = PnmlAttempt(
         pnml=pnml, issues=list(issues), stripped=[], counts=NetCounts(0, 0, 0)
     )
-    return PnmlGeneration(attempts=[attempt], best_index=0)
+    return PnmlGeneration(attempts=[attempt], best_index=0, usages=list(usages))
 
 # A marked start place, so only the level under test reports issues.
 MARKED_START = (
@@ -367,6 +372,20 @@ def _with_duplicate_arc(arc_id):
     )
 
 
+_CALL = TokenUsage(input=100, output=50, total=150)
+
+
+def _billed(replies):
+    """A _openai_generate_once stand-in that reports usage, as the real one does."""
+    queue = list(replies)
+
+    def once(*_args, usage_sink=None, **_kwargs):
+        usage_sink.append(_CALL)
+        return queue.pop(0)
+
+    return once
+
+
 class TestPnmlCorrectionLoop(unittest.TestCase):
     """The generate -> validate -> correct loop with a mocked provider."""
 
@@ -489,6 +508,23 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         self.assertEqual(generation.best.counts.transitions, 1)
         self.assertTrue(any("shrank the net" in line for line in logs.output))
 
+    def test_tokens_accumulate_over_every_provider_call(self):
+        generation, _ = self._generate(_billed([_with_duplicate_arc("a3"), VALID_NET]))
+        self.assertEqual(generation.usage_for(1), _CALL)
+        self.assertEqual(generation.tokens.total, 300)
+
+    def test_a_discarded_reply_is_billed_but_is_no_attempt(self):
+        # The second reply carries no net, so it never becomes an attempt --
+        # but the tokens it burned still belong in the total.
+        generation, _ = self._generate(_billed([_with_duplicate_arc("a3"), "no xml"]))
+        self.assertEqual(len(generation.attempts), 1)
+        self.assertEqual(generation.tokens.total, 300)
+
+    def test_a_provider_that_reports_no_usage_yields_no_tokens(self):
+        generation, _ = self._generate([VALID_NET])
+        self.assertIsNone(generation.tokens)
+        self.assertIsNone(generation.usage_for(0))
+
     @patch("app.services.llm_service.genai")
     def test_gemini_provider_is_dispatched(self, mock_genai):
         with patch.object(
@@ -504,6 +540,39 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         self.assertEqual(generation.best.issues, [])
         mocked.assert_called_once()
         mock_genai.configure.assert_called_once_with(api_key="test-key")
+
+
+class TestTokenUsageExtraction(unittest.TestCase):
+    """Provider reply -> TokenUsage. The SDK field names live only here."""
+
+    def test_openai_usage_is_mapped(self):
+        completion = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=1200, completion_tokens=800, total_tokens=2000
+            )
+        )
+        self.assertEqual(_openai_token_usage(completion), TokenUsage(1200, 800, 2000))
+
+    def test_openai_without_usage_is_none(self):
+        self.assertIsNone(_openai_token_usage(SimpleNamespace(usage=None)))
+
+    def test_gemini_usage_is_mapped(self):
+        response = SimpleNamespace(
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=300,
+                candidates_token_count=120,
+                total_token_count=420,
+            )
+        )
+        self.assertEqual(_gemini_token_usage(response), TokenUsage(300, 120, 420))
+
+    def test_gemini_without_usage_metadata_is_none(self):
+        self.assertIsNone(_gemini_token_usage(SimpleNamespace()))
+
+    def test_sum_adds_field_wise_and_skips_unrecorded_calls(self):
+        usages = [TokenUsage(10, 5, 15), None, TokenUsage(20, 5, 25)]
+        self.assertEqual(_sum_token_usage(usages), TokenUsage(30, 10, 40))
+        self.assertIsNone(_sum_token_usage([None]))
 
 
 class TestGeneratePnmlIntegration(unittest.TestCase):
@@ -563,7 +632,7 @@ class TestGeneratePnmlRoute(unittest.TestCase):
         self.app = create_app(TestingConfig)
         self.client = self.app.test_client()
 
-    def _post(self, **overrides):
+    def _post(self, debug=False, **overrides):
         payload = {
             "user_text": "ship the order",
             "provider": "openai",
@@ -571,7 +640,7 @@ class TestGeneratePnmlRoute(unittest.TestCase):
         }
         payload.update(overrides)
         return self.client.post(
-            "/generate_pnml_direct",
+            "/generate_pnml_direct?debug=1" if debug else "/generate_pnml_direct",
             json=payload,
             headers={"Authorization": "Bearer test-key"},
         )
@@ -608,6 +677,19 @@ class TestGeneratePnmlRoute(unittest.TestCase):
             response.headers["X-Validation-Issues"],
             "transition 't9' has no inbound arc",
         )
+
+    @patch("app.api.pnml_routes.model_registry.refresh_model_cache")
+    @patch("app.api.routes.model_registry.is_valid", return_value=True)
+    @patch(
+        "app.api.pnml_routes._llm_service.generate_pnml",
+        return_value=_generation(PNML_DOC, usages=[TokenUsage(1200, 800, 2000)]),
+    )
+    def test_debug_view_reports_tokens(self, _gen, _valid, _refresh):
+        payload = self._post(debug=True).get_json()
+        self.assertEqual(
+            payload["tokens"], {"input": 1200, "output": 800, "total": 2000}
+        )
+        self.assertEqual(payload["attempts"][0]["tokens"]["total"], 2000)
 
     def test_missing_auth_returns_401(self):
         response = self.client.post(

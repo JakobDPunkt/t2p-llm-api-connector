@@ -16,8 +16,38 @@ from app.utils.prompt_builder import PromptBuilder, STRICT_JSON_REMINDER
 #: One pass of the direct-PNML correction loop, after normalization.
 PnmlAttempt = namedtuple("PnmlAttempt", "pnml issues stripped counts")
 
+#: Tokens billed for one provider call. On reasoning models the hidden thinking
+#: is part of ``output``, which is also how it is billed.
+TokenUsage = namedtuple("TokenUsage", "input output total")
 
-class PnmlGeneration(namedtuple("PnmlGeneration", "attempts best_index")):
+
+def _openai_token_usage(chat_completion):
+    """Tokens of an OpenAI completion, or None when it reported none."""
+    usage = getattr(chat_completion, "usage", None)
+    if usage is None:
+        return None
+    return TokenUsage(usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+
+
+def _gemini_token_usage(response):
+    """Tokens of a Gemini reply, or None when it reported none."""
+    usage = getattr(response, "usage_metadata", None)
+    if usage is None:
+        return None
+    return TokenUsage(
+        usage.prompt_token_count, usage.candidates_token_count, usage.total_token_count
+    )
+
+
+def _sum_token_usage(usages):
+    """Field-wise sum of the recorded usages, or None when none were recorded."""
+    recorded = [usage for usage in usages if usage]
+    if not recorded:
+        return None
+    return TokenUsage(*(sum(field) for field in zip(*recorded)))
+
+
+class PnmlGeneration(namedtuple("PnmlGeneration", "attempts best_index usages")):
     """The full history of a direct-PNML generation.
 
     ``attempts[0]`` is the model's unaided first shot, every further entry one
@@ -26,12 +56,25 @@ class PnmlGeneration(namedtuple("PnmlGeneration", "attempts best_index")):
     passes is ``len(attempts) - 1``, the model's unaided quality is
     ``attempts[0].issues``, and a correction that traded net structure for
     validity shows up as shrinking ``counts``.
+
+    ``usages`` holds one :class:`TokenUsage` per provider call, in call order.
+    It can outrun ``attempts``: a reply without a usable net is billed but never
+    validated.
     """
 
     @property
     def best(self):
         """The delivered attempt: the one with the fewest remaining issues."""
         return self.attempts[self.best_index]
+
+    @property
+    def tokens(self):
+        """Tokens over every provider call, discarded replies included."""
+        return _sum_token_usage(self.usages)
+
+    def usage_for(self, index):
+        """Tokens of the call that produced ``attempts[index]``, if recorded."""
+        return self.usages[index] if index < len(self.usages) else None
 
 
 _PNML_BLOCK_RE = re.compile(r"<pnml\b.*?</pnml>", re.DOTALL | re.IGNORECASE)
@@ -469,6 +512,7 @@ class LLMService:
         model,
         prompt,
         max_completion_tokens=4096,
+        usage_sink=None,
     ):
         model_name = (model or "").lower()
         request_kwargs = {
@@ -505,16 +549,17 @@ class LLMService:
 
         finish_reason = getattr(first_choice, "finish_reason", None)
         refusal = getattr(message, "refusal", None)
-        usage = getattr(chat_completion, "usage", None)
-        prompt_tokens = getattr(usage, "prompt_tokens", None)
-        completion_tokens = getattr(usage, "completion_tokens", None)
+        # Recorded before the checks below: a truncated or empty reply is
+        # unusable, but its tokens were billed all the same.
+        token_usage = _openai_token_usage(chat_completion)
+        if usage_sink is not None:
+            usage_sink.append(token_usage)
 
         logger.debug(
-            "OpenAI completion metadata (model=%s, finish_reason=%s, prompt_tokens=%s, completion_tokens=%s, content_len=%d)",
+            "OpenAI completion metadata (model=%s, finish_reason=%s, tokens=%s, content_len=%d)",
             getattr(chat_completion, "model", model),
             finish_reason,
-            prompt_tokens,
-            completion_tokens,
+            token_usage,
             len(content),
         )
         # Truncation is checked before emptiness: on GPT-5 models reasoning
@@ -524,10 +569,10 @@ class LLMService:
         if _is_truncation_reason(finish_reason):
             logger.warning(
                 "OpenAI stopped at the token limit "
-                "(model=%s, completion_tokens=%s, content_len=%d); raise the "
+                "(model=%s, tokens=%s, content_len=%d); raise the "
                 "token budget or lower reasoning effort",
                 getattr(chat_completion, "model", model),
-                completion_tokens,
+                token_usage,
                 len(content),
             )
             raise TruncatedResponseError(
@@ -547,7 +592,9 @@ class LLMService:
         return content
 
     @staticmethod
-    def _gemini_generate_once(gen_model, prompt, max_output_tokens=2048):
+    def _gemini_generate_once(
+        gen_model, prompt, max_output_tokens=2048, usage_sink=None
+    ):
         response = gen_model.generate_content(
             prompt,
             generation_config=genai.types.GenerationConfig(
@@ -557,6 +604,9 @@ class LLMService:
                 max_output_tokens=max_output_tokens,
             ),
         )
+        # Recorded before the checks below; see _openai_generate_once.
+        if usage_sink is not None:
+            usage_sink.append(_gemini_token_usage(response))
         text = ((response.text or "") if hasattr(response, "text") else "").strip()
         if not text:
             raise EmptyResponseError("Gemini returned empty response text.")
@@ -775,11 +825,12 @@ class LLMService:
         overriding it with a blanket value fought those defaults and, on
         low-default models, made reasoning consume the whole token budget.
 
-        Returns a :class:`PnmlGeneration`: the full attempt history plus the
-        index of the delivered one. Per contract the document is delivered even
-        with remaining issues; the route exposes them in the
-        ``X-Validation-Issues`` response header.
+        Returns a :class:`PnmlGeneration`: the full attempt history, the index
+        of the delivered one, and the tokens each provider call was billed. Per
+        contract the document is delivered even with remaining issues; the route
+        exposes them in the ``X-Validation-Issues`` response header.
         """
+        usages = []
         method_name = model_registry.dispatch_method(provider)
         if method_name == "call_openai":
             client_kwargs = {"api_key": api_key}
@@ -795,6 +846,7 @@ class LLMService:
                     model,
                     prompt,
                     max_completion_tokens=_PNML_OPENAI_MAX_COMPLETION_TOKENS,
+                    usage_sink=usages,
                 )
 
         elif method_name == "call_gemini":
@@ -812,6 +864,7 @@ class LLMService:
                     gen_model,
                     prompt,
                     max_output_tokens=_PNML_GEMINI_MAX_OUTPUT_TOKENS,
+                    usage_sink=usages,
                 )
 
         else:
@@ -888,10 +941,10 @@ class LLMService:
             if len(attempts[-1].issues) < len(attempts[best_index].issues):
                 best_index = len(attempts) - 1
 
-        return self._finish_pnml_generation(attempts, best_index)
+        return self._finish_pnml_generation(attempts, best_index, usages)
 
     @staticmethod
-    def _finish_pnml_generation(attempts, best_index):
+    def _finish_pnml_generation(attempts, best_index, usages):
         """Log what the history reveals and wrap it into the result."""
         first, best = attempts[0], attempts[best_index]
 
@@ -919,4 +972,4 @@ class LLMService:
                 tuple(best.counts),
             )
 
-        return PnmlGeneration(attempts=attempts, best_index=best_index)
+        return PnmlGeneration(attempts, best_index, usages)
