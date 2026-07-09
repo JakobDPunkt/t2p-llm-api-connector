@@ -21,23 +21,23 @@ STRUCTURE RULES:
 - Every node lies on a path from the start place to the end place.
 
 FROM TEXT TO NET:
-- Each activity in the description becomes one transition. Model every activity the text mentions and never summarize, merge or drop steps: if the description names ten actions, the net has ten transitions.
+- Each described action becomes one transition; model every action and drop none. But a list of checks or details inside one action ("inspect brakes: levers, calipers, pads") is that one action, not one transition each.
 - An exclusive choice (either/or) is a place with one outgoing arc per alternative; the alternatives merge back into a shared place.
 - Parallel work (simultaneously/meanwhile) is a transition with one outgoing arc per branch; the branches join through one transition.
 - The arc counts alone carry these roles: a transition with exactly one incoming and one outgoing arc is a plain activity.
 - A split or join sits on the transition of the adjacent activity where the description has one; otherwise insert a transition without a <name>, which only routes the flow.
 - A repetition (again/until) is an arc from a transition back to the place where the repeated part starts.
 - Several possible endings (approved/rejected, success/failure, different outcomes) still share the one end place: every final transition points to it. Which ending occurred is shown by which transition fired, not by a separate end place.
-- Between two consecutive activities there is always a place. Model only what the description says.
+- Between two consecutive activities, and between phases, there is always a place; never join two places or two transitions directly. Model only what the description says.
 
 METHOD:
-Plan in two lists before the document, so no activity is dropped and no branch mislabelled.
+Plan before the XML, then build from the plan.
 
-First list the activities the description mentions under ACTIVITIES, one verb-object label per line. This is the checklist the net must cover; routing-only steps are not activities and do not belong here.
+ACTIVITIES: the described actions in process order, one verb-object label per line (routing-only steps excluded).
 
-Then list every branch point under BRANCHES, one line each: the cue that justifies it, whether it is an exclusive choice or parallel work, and the node that carries it (by id). Deciding this before writing arcs settles the choice-versus-parallel distinction, which the finished XML never states.
+BRANCHES: each branch point on one line: its cue, exclusive choice or parallel work, and the node (by id) that carries it. The XML never states this, so decide it here.
 
-Then write the document: give every entry in your ACTIVITIES list its own transition and follow your BRANCHES list. Before you finish, check two things. Every listed activity has a transition. And every node is wired into the flow: each place has an incoming and an outgoing arc except the single start place (no incoming) and the single end place (no outgoing), and no place or transition is left with no arcs.
+Then build the net by walking ACTIVITIES in order: each activity is a transition joined to the next through a place, bent at the BRANCHES points. Every listed activity must end up connected; a transition you create but leave without arcs is a mistake. Before finishing, confirm no place or transition is arc-less, and that only the start place lacks an incoming and only the end place lacks an outgoing arc.
 
 STYLE:
 - Activity transitions carry a concise verb-object label in the language of the description. Routing transitions and intermediate places need no name.
