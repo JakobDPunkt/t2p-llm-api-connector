@@ -435,30 +435,26 @@ const Api = {
     return message;
   },
 
-  /** Backend reachability probe. The pipeline backend has a dedicated
-   * health endpoint; the direct backend is the server that serves this
-   * page, so its /models call (needed for the dropdowns anyway) doubles
-   * as the probe. /health/ready would test provider connectivity instead
-   * and takes seconds. */
+  /** Backend reachability probe: direct is the server that serves this page,
+   * pipeline is the live deployment. Both answer a cheap health endpoint;
+   * /health/ready would test provider connectivity instead and takes
+   * seconds. */
   async reachable(mode) {
-    if (mode === "direct") return true; // refined by the models fetch below
-    const response = await fetch(LIVE_BASE + "/v2/health", {
-      signal: AbortSignal.timeout(8000),
-    });
+    const url = mode === "direct" ? "_/_/echo" : LIVE_BASE + "/v2/health";
+    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
     return response.ok;
   },
 
-  /** Both backends advertise provider/model pairs; endpoint paths differ.
-   * With an apiKey (direct mode only) the connector runs live discovery
-   * against the provider, so the list reflects what that key can access;
-   * that call takes longer than serving the cached list. The live
-   * /v2/models does not forward keys, so pipeline mode never sends one. */
-  async models(mode, apiKey) {
-    const url = mode === "direct" ? "models" : LIVE_BASE + "/v2/models";
-    const useKey = mode === "direct" && apiKey;
-    const response = await fetch(url, {
-      headers: useKey ? { Authorization: "Bearer " + apiKey } : undefined,
-      signal: AbortSignal.timeout(useKey ? 20000 : 8000),
+  /** Provider/model pairs, always from the connector that serves this page.
+   * Which models exist depends on the provider and the key, not on the
+   * backend that later runs the generation, so both modes share one list.
+   * The live /v2/models cannot answer this: it forwards no key and so only
+   * ever advertises its own fallback pair. With an apiKey the connector
+   * runs live discovery, which takes longer than serving the cached list. */
+  async models(apiKey) {
+    const response = await fetch("models", {
+      headers: apiKey ? { Authorization: "Bearer " + apiKey } : undefined,
+      signal: AbortSignal.timeout(apiKey ? 20000 : 8000),
     });
     if (!response.ok) throw new Error("models endpoint " + response.status);
     const payload = await response.json();
@@ -471,15 +467,14 @@ const Api = {
 const App = {
   sides: ["a", "b"],
   results: { a: null, b: null },
-  modelCache: {},
-  // Per-side model list discovered with that side's API key (direct mode);
-  // null falls back to the unauthenticated modelCache list.
-  sidePairs: { a: null, b: null },
-  keyedModelCache: {},
+  // One model list per API key ("" = unauthenticated). Which models exist
+  // depends on the key alone, never on the mode or the side.
+  modelsByKey: {},
   keyTimers: { a: null, b: null },
   timers: { a: null, b: null },
   running: false,
-  modeGeneration: { a: 0, b: 0 },
+  modelGeneration: { a: 0, b: 0 },
+  probeGeneration: { a: 0, b: 0 },
   backendUp: { a: null, b: null },
 
   el(id) { return document.getElementById(id); },
@@ -488,18 +483,19 @@ const App = {
 
   init() {
     for (const side of this.sides) {
-      this.input("mode", side).addEventListener("change", () => this.onModeChange(side));
+      this.input("mode", side).addEventListener("change", () => this.probeBackend(side));
       this.input("provider", side).addEventListener("change", () => this.onProviderChange(side));
       this.input("model", side).addEventListener("change", () => this.refreshRunButton());
       this.input("key", side).addEventListener("input", () => {
         this.refreshRunButton();
-        this.scheduleModelReload(side);
+        this.scheduleModelLoad(side);
       });
       this.resultCard(side).querySelector('[data-act="xml"]')
         .addEventListener("click", () => this.showXml(side));
       this.resultCard(side).querySelector('[data-act="download"]')
         .addEventListener("click", () => this.download(side));
-      this.onModeChange(side);
+      this.probeBackend(side);
+      this.loadModels(side);
     }
     this.el("text").addEventListener("input", () => this.refreshRunButton());
     this.el("run").addEventListener("click", () => this.runBoth());
@@ -512,91 +508,85 @@ const App = {
     this.refreshRunButton();
   },
 
-  async onModeChange(side) {
+  /** The mode picks the backend that runs the generation, nothing else: it
+   * leaves the model list alone. */
+  async probeBackend(side) {
     const mode = this.input("mode", side).value;
-    // Guard against a slow models fetch finishing after the user switched
-    // the mode again: only the latest invocation may touch the controls.
-    const generation = ++this.modeGeneration[side];
-    this.sidePairs[side] = null;
+    const generation = ++this.probeGeneration[side];
     this.backendUp[side] = null;
     this.setStatus(side, "checking", "checking backend…");
     this.refreshRunButton();
-    const providerSelect = this.input("provider", side);
-    const previous = providerSelect.value;
-    let pairs = this.modelCache[mode];
-    let reachable = Boolean(pairs);
-    if (!pairs) {
-      try {
-        const probe = Api.reachable(mode);
-        pairs = this.modelCache[mode] = await Api.models(mode);
-        reachable = await probe;
-      } catch {
-        // Neither result is cached, so the next mode change retries.
-        reachable = false;
-        pairs = [
-          { provider: "openai", model: "" },
-          { provider: "gemini", model: "" },
-        ];
-      }
+    let reachable;
+    try {
+      reachable = await Api.reachable(mode);
+    } catch {
+      reachable = false;
     }
-    if (!reachable) delete this.modelCache[mode];
-    if (generation !== this.modeGeneration[side]) return;
+    // A slow probe must not overwrite the status of a newer mode.
+    if (generation !== this.probeGeneration[side]) return;
     this.backendUp[side] = reachable;
     this.setStatus(
       side,
       reachable ? "ok" : "bad",
       reachable ? "backend reachable" : "backend not reachable"
     );
-    const providers = [...new Set(pairs.map((m) => m.provider))];
-    providerSelect.innerHTML = "";
+    this.refreshRunButton();
+  },
+
+  /** Debounced: refetch the model list once the user stops typing the key. */
+  scheduleModelLoad(side) {
+    clearTimeout(this.keyTimers[side]);
+    this.keyTimers[side] = setTimeout(() => this.loadModels(side), 600);
+  },
+
+  /** Fills both selects. Without a key the connector serves its own list;
+   * with one it discovers what that key can access, which takes longer. */
+  async loadModels(side) {
+    const key = this.input("key", side).value.trim();
+    const generation = ++this.modelGeneration[side];
+    if (key) this.setModelsNote(side, "loading model list for this key…");
+    if (!this.modelsByKey[key]) {
+      try {
+        this.modelsByKey[key] = await Api.models(key || undefined);
+      } catch {
+        // Leave the current selects alone rather than emptying them.
+        if (generation === this.modelGeneration[side]) {
+          this.setModelsNote(side, "Could not load the model list.");
+        }
+        return;
+      }
+    }
+    if (generation !== this.modelGeneration[side]) return;
+    this.fillProviders(side);
+    this.onProviderChange(side);
+  },
+
+  /** Providers are read off the model list, never hardcoded. */
+  fillProviders(side) {
+    const select = this.input("provider", side);
+    const previous = select.value;
+    const providers = [...new Set(this.pairs(side).map((m) => m.provider))];
+    select.innerHTML = "";
     for (const p of providers) {
       const option = document.createElement("option");
       option.value = option.textContent = p;
-      providerSelect.appendChild(option);
+      select.appendChild(option);
     }
-    if (providers.includes(previous)) providerSelect.value = previous;
-    this.onProviderChange(side, pairs);
-    // Re-apply a key-based list after the base list replaced it.
-    if (this.input("key", side).value.trim()) this.reloadModels(side);
+    if (providers.includes(previous)) select.value = previous;
   },
 
-  /** Debounced: refetch the model list with the side's API key once the
-   * user stops typing, so the dropdown shows what that key can access. */
-  scheduleModelReload(side) {
-    clearTimeout(this.keyTimers[side]);
-    this.keyTimers[side] = setTimeout(() => this.reloadModels(side), 600);
-  },
-
-  async reloadModels(side) {
-    const mode = this.input("mode", side).value;
-    if (mode !== "direct") return; // the live /v2/models ignores keys
+  /** The list for this side's key, falling back to the unauthenticated one
+   * while a keyed discovery is still in flight. */
+  pairs(side) {
     const key = this.input("key", side).value.trim();
-    const generation = ++this.modeGeneration[side];
-    if (!key) {
-      this.sidePairs[side] = null;
-      this.onProviderChange(side);
-      return;
-    }
-    this.setModelsNote(side, "loading model list for this key…");
-    let pairs = this.keyedModelCache[key];
-    if (!pairs) {
-      try {
-        pairs = this.keyedModelCache[key] = await Api.models(mode, key);
-      } catch {
-        pairs = null; // discovery call failed: keep the current list
-      }
-    }
-    if (generation !== this.modeGeneration[side]) return;
-    if (pairs) this.sidePairs[side] = pairs;
-    this.onProviderChange(side);
+    return this.modelsByKey[key] || this.modelsByKey[""] || [];
   },
 
   /** Strict select fed by the models endpoint, mirroring woped-web's
    * mat-select: only advertised provider/model pairs are offered. */
-  onProviderChange(side, pairs) {
-    const mode = this.input("mode", side).value;
+  onProviderChange(side) {
     const provider = this.input("provider", side).value;
-    const models = (pairs || this.sidePairs[side] || this.modelCache[mode] || [])
+    const models = this.pairs(side)
       .filter((m) => m.provider === provider && m.model)
       .map((m) => m.model);
     const modelSelect = this.input("model", side);
@@ -620,15 +610,10 @@ const App = {
    * from, and how to get the full one. A fallback-only list has exactly
    * one entry per provider. */
   updateModelsNote(side) {
-    const mode = this.input("mode", side).value;
     const hasKey = Boolean(this.input("key", side).value.trim());
     const count = this.input("model", side).options.length;
     let text;
-    if (mode === "pipeline") {
-      text = count > 1
-        ? `${count} models advertised by the live backend.`
-        : "Only the backend's default model is advertised.";
-    } else if (count > 1) {
+    if (count > 1) {
       text = `${count} models available for this provider.`;
     } else if (hasKey) {
       text = "Key not accepted for model discovery. Default model only.";
