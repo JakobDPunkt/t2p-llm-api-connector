@@ -308,6 +308,11 @@ const LIVE_BASE = "https://woped.dhbw-karlsruhe.de/t2p-2.0";
 // discarded by a premature abort.
 const TIMEOUT_MS = 240000;
 
+/** The model each panel selects on its own: the two cheap OpenAI tiers, so the
+ *  page opens on the comparison the demo is for. Only a preference: the user's
+ *  own pick always survives a provider or key change. */
+const DEFAULT_FAMILY = { a: "nano", b: "mini" };
+
 /** "1 issue" / "3 issues" without the (s) shorthand. Irregular plurals pass
  *  their own form: plural(2, "retry", "retries"). */
 function plural(n, word, many = word + "s") {
@@ -476,6 +481,10 @@ const App = {
   modelGeneration: { a: 0, b: 0 },
   probeGeneration: { a: 0, b: 0 },
   backendUp: { a: null, b: null },
+  // Set once the user picks a model by hand. Until then the side re-applies its
+  // DEFAULT_FAMILY on every refill, so the nano/mini pair still lands when the
+  // key arrives and turns a one-model fallback list into the real one.
+  modelChosen: { a: false, b: false },
 
   el(id) { return document.getElementById(id); },
   input(name, side) { return this.el(`${name}-${side}`); },
@@ -485,7 +494,10 @@ const App = {
     for (const side of this.sides) {
       this.input("mode", side).addEventListener("change", () => this.probeBackend(side));
       this.input("provider", side).addEventListener("change", () => this.onProviderChange(side));
-      this.input("model", side).addEventListener("change", () => this.refreshRunButton());
+      this.input("model", side).addEventListener("change", () => {
+        this.modelChosen[side] = true;
+        this.refreshRunButton();
+      });
       this.input("key", side).addEventListener("input", () => {
         this.refreshRunButton();
         this.scheduleModelLoad(side);
@@ -597,9 +609,33 @@ const App = {
       option.value = option.textContent = m;
       modelSelect.appendChild(option);
     }
-    if (models.includes(previous)) modelSelect.value = previous;
+    const preferred = this.modelChosen[side]
+      ? undefined
+      : this.newestOfFamily(models, DEFAULT_FAMILY[side]);
+    if (preferred) modelSelect.value = preferred;
+    else if (models.includes(previous)) modelSelect.value = previous;
     this.updateModelsNote(side);
     this.refreshRunButton();
+  },
+
+  /** The newest model of a family, ranked by the version in its id, so that a
+   *  future gpt-5.5-nano wins over gpt-5.4-nano without touching this code.
+   *  Undated ids beat dated snapshots of the same version (gpt-5.4-nano over
+   *  gpt-5.4-nano-2026-03-01); among snapshots the latest date wins. Returns
+   *  undefined when the provider offers no model of that family. */
+  newestOfFamily(models, family) {
+    const rank = (model) => {
+      const version = parseFloat((model.match(/(\d+(?:\.\d+)?)/) || [])[1]) || 0;
+      const date = (model.match(/\d{4}-\d{2}-\d{2}$/) || [])[0] || "";
+      return [version, date ? 0 : 1, date];
+    };
+    return models
+      .filter((m) => m.split("-").includes(family))
+      .sort((a, b) => {
+        const [va, da, sa] = rank(a);
+        const [vb, db, sb] = rank(b);
+        return vb - va || db - da || sb.localeCompare(sa);
+      })[0];
   },
 
   setModelsNote(side, text) {
