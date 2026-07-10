@@ -36,9 +36,11 @@ Plan before the XML, then build from the plan.
 
 ACTIVITIES: the described actions in process order, one verb-object label per line (routing-only steps excluded).
 
-BRANCHES: each branch point on one line: its cue, exclusive choice or parallel work, and the node (by id) that carries it. The XML never states this, so decide it here.
+BRANCHES: each branch point on one line: its cue, exclusive choice or parallel work, the node (by id) that carries the split, the branches it opens, and the node (by id) where they rejoin, naming the arc that carries each branch into it. A loop rejoins at the place its repeated part starts from. The XML never states any of this, so decide it here.
 
-Then build from the lists: join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and reconverge it the same way: a choice and a loop rejoin at a place, parallel work at a transition. Route a repetition from a transition back to an earlier place. Never flatten a branching or looping process into one straight line. Every listed activity must end up connected, and a transition left without arcs is a mistake. Before finishing, confirm every BRANCHES entry and every loop appears in the net and reconverges at the right node type (a place for choices and loops, a transition only for parallel work), nothing is arc-less, and only the start place lacks an incoming and only the end place lacks an outgoing arc.
+FLOW: every arc of the net, one "source -> target" per line, in process order, back-edges last and marked. Build it from the two lists: join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and rejoin it exactly as that entry says. Never flatten a branching or looping process into one straight line.
+
+Then the XML transcribes FLOW: one <arc> in the order of the FLOW lines, and no arc that FLOW does not list. Before finishing, check the FLOW list itself: every id from ACTIVITIES and BRANCHES occurs in it; every node except the start place occurs at least once as a target, and every node except the end place occurs at least once as a source; every transition occurs exactly once as a source and exactly once as a target, unless a BRANCHES entry marks it as parallel work.
 
 STYLE:
 - Activity transitions carry a concise verb-object label in the language of the description. Routing transitions and intermediate places need no name.
@@ -54,8 +56,17 @@ ACTIVITIES:
 - resolve issue
 - escalate issue
 BRANCHES:
-- "if a solution is found ... otherwise": exclusive choice on place p_analyzed, 2 outgoing arcs
-- "analyzed again": repetition, arc from t_escalate_issue back to p_reported
+- "if a solution is found ... otherwise": exclusive choice on place p_analyzed, branches t_resolve_issue and t_escalate_issue; t_resolve_issue rejoins at place p_end via t_resolve_issue -> p_end
+- "analyzed again": repetition, t_escalate_issue rejoins at place p_reported via t_escalate_issue -> p_reported
+FLOW:
+- p_start -> t_report_issue
+- t_report_issue -> p_reported
+- p_reported -> t_analyze_issue
+- t_analyze_issue -> p_analyzed
+- p_analyzed -> t_resolve_issue
+- p_analyzed -> t_escalate_issue
+- t_resolve_issue -> p_end
+- t_escalate_issue -> p_reported (back-edge)
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
@@ -73,8 +84,8 @@ BRANCHES:
 <arc id="a4" source="t_analyze_issue" target="p_analyzed"/>
 <arc id="a5" source="p_analyzed" target="t_resolve_issue"/>
 <arc id="a6" source="p_analyzed" target="t_escalate_issue"/>
-<arc id="a7" source="t_escalate_issue" target="p_reported"/>
-<arc id="a8" source="t_resolve_issue" target="p_end"/>
+<arc id="a7" source="t_resolve_issue" target="p_end"/>
+<arc id="a8" source="t_escalate_issue" target="p_reported"/>
 </net>
 </pnml>
 
@@ -88,10 +99,24 @@ ACTIVITIES:
 - bestätigung senden
 - ablehnung senden
 BRANCHES:
-- "während gleichzeitig": parallel work, split on transition t_antrag_einreichen, 2 outgoing arcs
-- "danach": the parallel branches join on transition t_ergebnis_dokumentieren, 2 incoming arcs
-- "bei Genehmigung ... andernfalls": exclusive choice on place p_dokumentiert, 2 outgoing arcs
-- two outcomes, one ending: t_bestaetigung_senden and t_ablehnung_senden both point to the single p_end
+- "während gleichzeitig": parallel work, split on transition t_antrag_einreichen, branches p_antrag_offen and p_zeitkonto_offen
+- "danach": the parallel branches rejoin on transition t_ergebnis_dokumentieren via p_geprueft -> t_ergebnis_dokumentieren and p_aktualisiert -> t_ergebnis_dokumentieren
+- "bei Genehmigung ... andernfalls": exclusive choice on place p_dokumentiert, branches t_bestaetigung_senden and t_ablehnung_senden; both rejoin at place p_end via t_bestaetigung_senden -> p_end and t_ablehnung_senden -> p_end
+FLOW:
+- p_start -> t_antrag_einreichen
+- t_antrag_einreichen -> p_antrag_offen
+- t_antrag_einreichen -> p_zeitkonto_offen
+- p_antrag_offen -> t_antrag_pruefen
+- p_zeitkonto_offen -> t_zeitkonto_aktualisieren
+- t_antrag_pruefen -> p_geprueft
+- t_zeitkonto_aktualisieren -> p_aktualisiert
+- p_geprueft -> t_ergebnis_dokumentieren
+- p_aktualisiert -> t_ergebnis_dokumentieren
+- t_ergebnis_dokumentieren -> p_dokumentiert
+- p_dokumentiert -> t_bestaetigung_senden
+- p_dokumentiert -> t_ablehnung_senden
+- t_bestaetigung_senden -> p_end
+- t_ablehnung_senden -> p_end
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
@@ -132,8 +157,19 @@ ACTIVITIES:
 - create invoice
 - ship parcel
 BRANCHES:
-- "simultaneously": parallel work at the very start, no activity precedes it, so a routing transition t_split carries it, 2 outgoing arcs
-- "afterwards": the parallel branches join on transition t_ship_parcel, 2 incoming arcs
+- "simultaneously": parallel work at the very start, no activity precedes it, so a routing transition t_split carries it, branches p_to_pack and p_to_invoice
+- "afterwards": the parallel branches rejoin on transition t_ship_parcel via p_packed -> t_ship_parcel and p_invoiced -> t_ship_parcel
+FLOW:
+- p_start -> t_split
+- t_split -> p_to_pack
+- t_split -> p_to_invoice
+- p_to_pack -> t_pack_goods
+- p_to_invoice -> t_create_invoice
+- t_pack_goods -> p_packed
+- t_create_invoice -> p_invoiced
+- p_packed -> t_ship_parcel
+- p_invoiced -> t_ship_parcel
+- t_ship_parcel -> p_end
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
@@ -160,4 +196,4 @@ BRANCHES:
 </net>
 </pnml>
 
-Reply with the ACTIVITIES list, the BRANCHES list, then exactly one well-formed PNML XML document, and nothing else.
+Reply with the ACTIVITIES list, the BRANCHES list, the FLOW list, then exactly one well-formed PNML XML document, and nothing else.
