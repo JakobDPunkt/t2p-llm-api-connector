@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 import time
 from collections import namedtuple
 
@@ -230,6 +231,62 @@ def _is_truncation_reason(finish_reason):
     """
     name = getattr(finish_reason, "name", None) or str(finish_reason or "")
     return name.upper() in {"LENGTH", "MAX_TOKENS"}
+
+
+# How often a transient provider failure is retried before giving up, and the
+# base backoff. These failures heal on retry -- the same call succeeds moments
+# later -- so a single one must not abort a whole generation. A generation makes
+# one call plus one per correction pass, and each aborts on any failed call, so
+# without this the XML path (more correction passes) is hit disproportionately.
+_TRANSIENT_RETRIES = 3
+_TRANSIENT_BACKOFF_S = 0.5
+
+
+def _is_transient_provider_error(exc):
+    """Whether a provider error is the intermittent kind a retry heals.
+
+    Retried: an intermittent 401 "insufficient permissions" (observed to
+    self-heal), 5xx server errors, and connection/timeout errors. NOT retried:
+    a real 400, a bad-key 401 (``invalid_api_key``), quota/rate limits, or our
+    own empty/truncated-reply errors -- those are permanent or handled elsewhere
+    and must fail fast rather than be masked.
+    """
+    text = str(exc).lower()
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = getattr(exc, "code", None)  # google-genai names it 'code'
+    if isinstance(status, int):
+        if 500 <= status < 600:
+            return True
+        if status == 401 and "insufficient permissions" in text:
+            return True
+    name = type(exc).__name__.lower()
+    if "timeout" in name or "connection" in name:
+        return True
+    # Fallback on the observed signature when the status code could not be read.
+    return "insufficient permissions" in text
+
+
+def _call_with_retry(send_once, model):
+    """Run one provider call, retrying only transient failures with backoff.
+
+    ``send_once`` performs a single API call and returns its result or raises.
+    A transient error is retried up to ``_TRANSIENT_RETRIES`` times with
+    exponential backoff and jitter; every other error propagates immediately.
+    """
+    for attempt in range(_TRANSIENT_RETRIES + 1):
+        try:
+            return send_once()
+        except Exception as exc:  # noqa: BLE001 -- re-raised unless transient
+            if attempt == _TRANSIENT_RETRIES or not _is_transient_provider_error(exc):
+                raise
+            delay = _TRANSIENT_BACKOFF_S * (2 ** attempt) + random.uniform(0, 0.25)
+            logger.warning(
+                "Transient provider error (model=%s, attempt %d/%d): %s; "
+                "retrying in %.1fs",
+                model, attempt + 1, _TRANSIENT_RETRIES, str(exc)[:140], delay,
+            )
+            time.sleep(delay)
 
 
 class LLMService:
@@ -633,8 +690,11 @@ class LLMService:
         # those models are not greedy, and no request parameter can make them be.
         if not model_name.startswith("gpt-5"):
             request_kwargs["temperature"] = 0
+        def _send():
+            return send(**request_kwargs)
+
         try:
-            chat_completion = send(**request_kwargs)
+            chat_completion = _call_with_retry(_send, model)
         except Exception as e:
             # Some OpenAI models (for example GPT-5 variants) only accept the
             # default temperature and reject an explicit value.
@@ -645,7 +705,7 @@ class LLMService:
                     model,
                 )
                 request_kwargs.pop("temperature", None)
-                chat_completion = send(**request_kwargs)
+                chat_completion = _call_with_retry(_send, model)
             else:
                 # A model that cannot honour the requested response format is
                 # the wrong model for this endpoint. Say so; do not quietly
@@ -731,10 +791,13 @@ class LLMService:
         if schema is not None:
             config["response_mime_type"] = "application/json"
             config["response_schema"] = schema
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=new_genai.types.GenerateContentConfig(**config),
+        response = _call_with_retry(
+            lambda: client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=new_genai.types.GenerateContentConfig(**config),
+            ),
+            model,
         )
         # Recorded before the checks below; see _openai_generate_once.
         if usage_sink is not None:
