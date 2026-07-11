@@ -17,3 +17,8 @@ FROM TEXT TO NET:
 - Several possible endings (approved/rejected, success/failure, different outcomes) still share the one end place: every final transition points to it. Which ending occurred is shown by which transition fired, not by a separate end place.
 - The net models one single run of the process: a step that returns the system to its initial or idle state for the next case is the END of this run -- route it to the end place, never with an arc back to the start place.
 - Between two consecutive activities, and between phases, there is always a place; never join two places or two transitions directly. Model only what the description says.
+
+PLAN (decide these before building the net):
+- ACTIVITIES: the described actions in process order, one verb-object label per entry (routing-only steps excluded). An activity transition carries that label in the language of the description; routing transitions and intermediate places stay unnamed; only the start and end place carry a name.
+- BRANCHES: each branch point as one entry: its cue, exclusive choice or parallel work, the node (by id) that carries the split, the branches it opens, and the node (by id) where they rejoin, naming the arc that carries each branch into it. A loop rejoins at the place its repeated part starts from. The arcs never state any of this, so decide it here.
+- Before finishing, check the arcs: every id from ACTIVITIES and BRANCHES occurs in them; every node except the start place occurs at least once as a target, and every node except the end place occurs at least once as a source; every transition occurs exactly once as a source and exactly once as a target, unless a BRANCHES entry marks it as parallel work.

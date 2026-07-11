@@ -19,18 +19,10 @@ STRUCTURE RULES:
 {SEMANTICS}
 
 METHOD:
-Work the net out before you write the XML. Do not put any of this in your answer: the answer is the document alone.
-
-ACTIVITIES: the described actions in process order, one verb-object label each (routing-only steps excluded).
-
-BRANCHES: each branch point: its cue, exclusive choice or parallel work, the node (by id) that carries the split, the branches it opens, and the node (by id) where they rejoin, naming the arc that carries each branch into it. A loop rejoins at the place its repeated part starts from. The XML never states any of this, so decide it beforehand.
-
-FLOW: every arc of the net as "source -> target", in process order, back-edges last. Build it from the two lists: join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and rejoin it exactly as that entry says. Never flatten a branching or looping process into one straight line.
-
-The XML then transcribes FLOW: one <arc> per FLOW entry, in that order, and no arc that FLOW does not list. Before writing it, check FLOW itself: every id from ACTIVITIES and BRANCHES occurs in it; every node except the start place occurs at least once as a target, and every node except the end place occurs at least once as a source; every transition occurs exactly once as a source and exactly once as a target, unless a BRANCHES entry marks it as parallel work.
+Plan first (ACTIVITIES and BRANCHES above); the plan is not part of the answer, the answer is the document alone. Then build the flow: every arc of the net as "source -> target", in process order, back-edges last. Join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and rejoin it exactly as that entry says. Never flatten a branching or looping process into one straight line. The XML transcribes this flow: one <arc> per flow entry, in that order, and no arc the flow does not list. Run the plan check (above) on the arcs before writing.
 
 STYLE:
-- Activity transitions carry a concise verb-object label in the language of the description. Routing transitions and intermediate places need no name.
+- Unnamed nodes carry no <name> element.
 - Keep the XML compact like the examples: one element per line, no indentation.
 - The answer begins with the XML declaration and ends with </pnml>. No prose, no explanation, no markdown fence, before, between or after the elements.
 
@@ -60,38 +52,63 @@ Answer:
 </net>
 </pnml>
 
-Description: "Ein Mitarbeiter reicht einen Urlaubsantrag ein. Die Personalabteilung prüft den Antrag, während gleichzeitig das Zeitkonto aktualisiert wird. Danach wird das Ergebnis dokumentiert. Bei Genehmigung erhält der Mitarbeiter eine Bestätigung, andernfalls eine Ablehnung."
+Description: "Ein Kunde bestellt eine Ware. Ist sie vorrätig, wird sie aus dem Lager entnommen, andernfalls wird sie nachbestellt. Anschließend wird die Bestellung verpackt und versendet."
 Answer:
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
 <place id="p_start"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
-<transition id="t_antrag_einreichen"><name><text>urlaubsantrag einreichen</text></name></transition>
-<place id="p_antrag_offen"/>
-<place id="p_zeitkonto_offen"/>
-<transition id="t_antrag_pruefen"><name><text>antrag prüfen</text></name></transition>
-<transition id="t_zeitkonto_aktualisieren"><name><text>zeitkonto aktualisieren</text></name></transition>
+<transition id="t_ware_bestellen"><name><text>ware bestellen</text></name></transition>
+<place id="p_bestellt"/>
+<transition id="t_verfuegbarkeit_pruefen"><name><text>verfügbarkeit prüfen</text></name></transition>
 <place id="p_geprueft"/>
-<place id="p_aktualisiert"/>
-<transition id="t_ergebnis_dokumentieren"><name><text>ergebnis dokumentieren</text></name></transition>
-<place id="p_dokumentiert"/>
-<transition id="t_bestaetigung_senden"><name><text>bestätigung senden</text></name></transition>
-<transition id="t_ablehnung_senden"><name><text>ablehnung senden</text></name></transition>
+<transition id="t_ware_entnehmen"><name><text>ware entnehmen</text></name></transition>
+<transition id="t_ware_nachbestellen"><name><text>ware nachbestellen</text></name></transition>
+<place id="p_bereit"/>
+<transition id="t_bestellung_verpacken"><name><text>bestellung verpacken</text></name></transition>
+<place id="p_verpackt"/>
+<transition id="t_bestellung_versenden"><name><text>bestellung versenden</text></name></transition>
 <place id="p_end"><name><text>end</text></name></place>
-<arc id="a1" source="p_start" target="t_antrag_einreichen"/>
-<arc id="a2" source="t_antrag_einreichen" target="p_antrag_offen"/>
-<arc id="a3" source="t_antrag_einreichen" target="p_zeitkonto_offen"/>
-<arc id="a4" source="p_antrag_offen" target="t_antrag_pruefen"/>
-<arc id="a5" source="p_zeitkonto_offen" target="t_zeitkonto_aktualisieren"/>
-<arc id="a6" source="t_antrag_pruefen" target="p_geprueft"/>
-<arc id="a7" source="t_zeitkonto_aktualisieren" target="p_aktualisiert"/>
-<arc id="a8" source="p_geprueft" target="t_ergebnis_dokumentieren"/>
-<arc id="a9" source="p_aktualisiert" target="t_ergebnis_dokumentieren"/>
-<arc id="a10" source="t_ergebnis_dokumentieren" target="p_dokumentiert"/>
-<arc id="a11" source="p_dokumentiert" target="t_bestaetigung_senden"/>
-<arc id="a12" source="p_dokumentiert" target="t_ablehnung_senden"/>
-<arc id="a13" source="t_bestaetigung_senden" target="p_end"/>
-<arc id="a14" source="t_ablehnung_senden" target="p_end"/>
+<arc id="a1" source="p_start" target="t_ware_bestellen"/>
+<arc id="a2" source="t_ware_bestellen" target="p_bestellt"/>
+<arc id="a3" source="p_bestellt" target="t_verfuegbarkeit_pruefen"/>
+<arc id="a4" source="t_verfuegbarkeit_pruefen" target="p_geprueft"/>
+<arc id="a5" source="p_geprueft" target="t_ware_entnehmen"/>
+<arc id="a6" source="p_geprueft" target="t_ware_nachbestellen"/>
+<arc id="a7" source="t_ware_entnehmen" target="p_bereit"/>
+<arc id="a8" source="t_ware_nachbestellen" target="p_bereit"/>
+<arc id="a9" source="p_bereit" target="t_bestellung_verpacken"/>
+<arc id="a10" source="t_bestellung_verpacken" target="p_verpackt"/>
+<arc id="a11" source="p_verpackt" target="t_bestellung_versenden"/>
+<arc id="a12" source="t_bestellung_versenden" target="p_end"/>
+</net>
+</pnml>
+
+Description: "A support agent receives a ticket. If the issue is unclear, the agent first requests more details; otherwise that step is skipped. The agent then resolves the ticket and closes it."
+Answer:
+<?xml version="1.0" encoding="UTF-8"?>
+<pnml>
+<net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
+<place id="p_start"><name><text>start</text></name><initialMarking><text>1</text></initialMarking></place>
+<transition id="t_receive_ticket"><name><text>receive ticket</text></name></transition>
+<place id="p_received"/>
+<transition id="t_request_details"><name><text>request more details</text></name></transition>
+<transition id="t_skip_details"/>
+<place id="p_ready"/>
+<transition id="t_resolve_ticket"><name><text>resolve ticket</text></name></transition>
+<place id="p_resolved"/>
+<transition id="t_close_ticket"><name><text>close ticket</text></name></transition>
+<place id="p_end"><name><text>end</text></name></place>
+<arc id="a1" source="p_start" target="t_receive_ticket"/>
+<arc id="a2" source="t_receive_ticket" target="p_received"/>
+<arc id="a3" source="p_received" target="t_request_details"/>
+<arc id="a4" source="p_received" target="t_skip_details"/>
+<arc id="a5" source="t_request_details" target="p_ready"/>
+<arc id="a6" source="t_skip_details" target="p_ready"/>
+<arc id="a7" source="p_ready" target="t_resolve_ticket"/>
+<arc id="a8" source="t_resolve_ticket" target="p_resolved"/>
+<arc id="a9" source="p_resolved" target="t_close_ticket"/>
+<arc id="a10" source="t_close_ticket" target="p_end"/>
 </net>
 </pnml>
 

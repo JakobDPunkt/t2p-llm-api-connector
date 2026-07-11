@@ -416,6 +416,17 @@ class TestSharedPromptSemantics(unittest.TestCase):
             self.assertEqual(PnmlValidator().check(pnml_from_json(payload)).issues, [])
         self.assertEqual(examples, 5)  # the target format plus four examples
 
+    def test_the_xml_examples_are_valid_and_sound(self):
+        """Parity with the JSON examples: each PNML document the XML prompt shows
+        must pass the same validator, via the XML path's own to_pnml step."""
+        import re
+
+        docs = re.findall(r"<\?xml.*?</pnml>", BaseConfig.PNML_SYSTEM_PROMPT, re.DOTALL)
+        self.assertEqual(len(docs), 5)  # the target format plus four examples
+        for doc in docs:
+            pnml = PNML_FORMATS["xml"].to_pnml(doc)
+            self.assertEqual(PnmlValidator().check(pnml).issues, [])
+
 
 class TestJsonEndpoint(unittest.TestCase):
     """The route: same contract, same debug view, different prompt and format."""

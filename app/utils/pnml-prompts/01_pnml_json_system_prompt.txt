@@ -11,19 +11,12 @@ STRUCTURE RULES:
 {SEMANTICS}
 
 METHOD:
-Plan before the arcs, then build from the plan.
+Plan first (ACTIVITIES and BRANCHES above), then build "arcs": every arc of the net, in process order, back-edges last. Join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and rejoin it exactly as that entry says. Never flatten a branching or looping process into one straight line.
 
-ACTIVITIES: the described actions in process order, one verb-object label per entry (routing-only steps excluded).
-
-BRANCHES: each branch point as one entry: its cue, exclusive choice or parallel work, the node (by id) that carries the split, the branches it opens, and the node (by id) where they rejoin, naming the arc that carries each branch into it. A loop rejoins at the place its repeated part starts from. The arcs never state any of this, so decide it here.
-
-ARCS: every arc of the net, in process order, back-edges last. Build them from the two lists: join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and rejoin it exactly as that entry says. Never flatten a branching or looping process into one straight line.
-
-Then fill "nodes": one glossary entry for each id that occurs in "arcs" -- no more, no less -- with its "kind" and its label. Before finishing, check the arcs themselves: every id from ACTIVITIES and BRANCHES occurs in them; every node except the start place occurs at least once as a target, and every node except the end place occurs at least once as a source; every transition occurs exactly once as a source and exactly once as a target, unless a BRANCHES entry marks it as parallel work.
+Then fill "nodes": one glossary entry for each id that occurs in "arcs" -- no more, no less -- with its "kind" and its label, then run the plan check (above) on the arcs.
 
 STYLE:
-- Activity transitions carry a concise verb-object label in the language of the description. Routing transitions and intermediate places carry "name": null.
-- Only the start and end place carry a name.
+- Unnamed nodes carry "name": null.
 
 EXAMPLES (they illustrate the mapping; always model the actual description):
 
