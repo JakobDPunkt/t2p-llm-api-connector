@@ -8,7 +8,6 @@ STRUCTURE RULES:
 - The object contains exactly the four keys shown above and nothing else.
 - "arcs" IS the net: a node exists exactly when an arc references it. Never leave a node with no arc, and never write an arc to an id you do not intend as a node.
 - "nodes" is a glossary for the ids the arcs use: one entry per id, giving its "kind" ("place" or "transition") and its "name". It does not decide what exists; an entry for an id that appears in no arc is ignored, and the start place is recognized by having no incoming arc, so you never state a marking.
-- Firing semantics decide the node kind at every merge: a transition fires only when every incoming arc carries a token, so it waits for all of them, while a place with several outgoing arcs passes its one token to exactly one. Therefore alternatives (only one branch runs) rejoin at a place, and parallel branches (all run) synchronize at a transition.
 {SEMANTICS}
 
 METHOD:
@@ -18,9 +17,7 @@ ACTIVITIES: the described actions in process order, one verb-object label per en
 
 BRANCHES: each branch point as one entry: its cue, exclusive choice or parallel work, the node (by id) that carries the split, the branches it opens, and the node (by id) where they rejoin, naming the arc that carries each branch into it. A loop rejoins at the place its repeated part starts from. The arcs never state any of this, so decide it here.
 
-ARCS: every arc of the net, in process order, back-edges last. Build them from the two lists: join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and rejoin it exactly as that entry says. Never flatten a branching or looping process into one straight line. After an exclusive choice rejoins at a place, model the steps that follow it once, starting from that place; never repeat the post-choice steps inside each branch, and never give each branch its own ending -- that duplicates the tail into parallel same-named copies instead of one shared continuation. An optional step (do it, or skip it) is an exclusive choice as well: one branch is the step, the other is a nameless routing transition that skips it, and both rejoin at a place before the flow continues. Never let two alternative branches point into the same transition -- that transition then waits for a token from every branch at once and deadlocks the net; alternatives always rejoin at a place, never at a transition.
-
-The net models one single run of the process. A step that returns the system to its initial or idle state for the next case is the END of this run: route it to the end place, never with an arc back to the start place.
+ARCS: every arc of the net, in process order, back-edges last. Build them from the two lists: join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and rejoin it exactly as that entry says. Never flatten a branching or looping process into one straight line.
 
 Then fill "nodes": one glossary entry for each id that occurs in "arcs" -- no more, no less -- with its "kind" and its label. Before finishing, check the arcs themselves: every id from ACTIVITIES and BRANCHES occurs in them; every node except the start place occurs at least once as a target, and every node except the end place occurs at least once as a source; every transition occurs exactly once as a source and exactly once as a target, unless a BRANCHES entry marks it as parallel work.
 

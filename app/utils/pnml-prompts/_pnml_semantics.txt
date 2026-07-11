@@ -1,16 +1,19 @@
 - Arcs always connect one place and one transition, alternating between the two.
+- Firing semantics decide the node kind at every merge: a transition fires only when every incoming arc carries a token, so it waits for all of them, while a place with several outgoing arcs passes its one token to exactly one. Therefore alternatives (only one branch runs) rejoin at a place, and parallel branches (all run) synchronize at a transition.
 - Node ids say what the node is (p_analyzed, t_resolve_issue), so an arc referencing them is self-checking. All ids are unique. Every arc references existing ids. At most one arc per direction between any two nodes.
 - Exactly one start place: it has no incoming arcs. Exactly one end place: it has no outgoing arcs.
 - Every node lies on a path from the start place to the end place.
 
 FROM TEXT TO NET:
 - Each described action becomes one transition; model every action and drop none. But a list of checks or details inside one action ("inspect brakes: levers, calipers, pads") is that one action, not one transition each.
-- An exclusive choice (either/or) is a place with one outgoing arc per alternative.
+- An exclusive choice (either/or) is a place with one outgoing arc per alternative. An optional step (do it, or skip it) is an exclusive choice too: one branch is the step, the other a nameless routing transition that skips it, and both rejoin at a place before the flow continues.
 - The outcome of a condition ("approved", "authenticated", "passed", "retry limit exceeded") is never a node. The token waits in the one choice place, and the outcome is which alternative transition fires. Ids like p_authorization_approved, p_authenticated or p_tested are that mistake: they name a state the net already expresses, and no arc can legally reach them. A place that simply follows an activity (p_analyzed, p_geprueft) is the normal case and stays; only a place naming which branch was taken is wrong.
 - Parallel work (simultaneously/meanwhile) is a transition with one outgoing arc per branch.
 - Merges mirror splits: alternatives and loops rejoin at a place, where a token from any one branch continues; parallel branches synchronize at a transition that waits for all of them. Never merge alternatives at a transition: with several incoming arcs it fires only when every branch has a token, which deadlocks the net.
+- After an exclusive choice rejoins at a place, model the steps that follow it once, from that place; never repeat the post-choice steps inside each branch and never give each branch its own ending -- that duplicates the tail into parallel same-named copies instead of one shared continuation.
 - The arc counts alone carry these roles: a transition with exactly one incoming and one outgoing arc is a plain activity.
 - A split or join sits on the transition of the adjacent activity where the description has one; otherwise insert a transition without a name, which only routes the flow.
 - A repetition (again/until) is an arc from a transition back to the place where the repeated part starts.
 - Several possible endings (approved/rejected, success/failure, different outcomes) still share the one end place: every final transition points to it. Which ending occurred is shown by which transition fired, not by a separate end place.
+- The net models one single run of the process: a step that returns the system to its initial or idle state for the next case is the END of this run -- route it to the end place, never with an arc back to the start place.
 - Between two consecutive activities, and between phases, there is always a place; never join two places or two transitions directly. Model only what the description says.
