@@ -5,6 +5,12 @@ flasgger==0.9.7.1
 flask-wtf==1.2.1
 openai==1.79.0
 google-generativeai==0.8.5
+# The direct-PNML path only: the deprecated SDK above cannot express a schema's
+# property order, which is what makes the model plan before it builds.
+google-genai==2.9.0
+# Schema source for the direct-PNML JSON path; both provider SDKs compile it.
+# Already present transitively via openai; pinned here because we import it.
+pydantic==2.13.4
 prometheus_client==0.19.0
 python-json-logger==0.1.11
 redis==5.2.1

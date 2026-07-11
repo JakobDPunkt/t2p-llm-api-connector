@@ -29,7 +29,8 @@
           <div class="full">
             <label for="mode-a">Backend</label>
             <select id="mode-a">
-              <option value="direct" selected>Direct PNML (/generate_pnml_direct)</option>
+              <option value="direct" selected>Direct PNML, XML (/generate_pnml_direct)</option>
+              <option value="direct-json">Direct PNML, JSON (/generate_pnml_direct_json)</option>
               <option value="pipeline">Pipeline (/v2/generate/pnml)</option>
             </select>
           </div>
@@ -58,8 +59,9 @@
           <div class="full">
             <label for="mode-b">Backend</label>
             <select id="mode-b">
-              <option value="direct">Direct PNML (/generate_pnml_direct)</option>
-              <option value="pipeline" selected>Pipeline (/v2/generate/pnml)</option>
+              <option value="direct">Direct PNML, XML (/generate_pnml_direct)</option>
+              <option value="direct-json" selected>Direct PNML, JSON (/generate_pnml_direct_json)</option>
+              <option value="pipeline">Pipeline (/v2/generate/pnml)</option>
             </select>
           </div>
           <div>

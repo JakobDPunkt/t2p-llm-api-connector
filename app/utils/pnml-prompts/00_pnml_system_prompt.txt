@@ -15,59 +15,29 @@ TARGET FORMAT, a complete minimal document:
 
 STRUCTURE RULES:
 - The document contains exactly one <net> and only the element kinds shown above.
-- Arcs always connect one place and one transition, alternating between the two.
-- Node ids say what the node is (p_analyzed, t_resolve_issue), so an arc referencing them is self-checking. All ids are unique. Every arc references existing ids. At most one arc per direction between any two nodes.
-- Exactly one start place: it has no incoming arcs and carries the single <initialMarking> with value 1. Exactly one end place: it has no outgoing arcs.
-- Every node lies on a path from the start place to the end place.
-
-FROM TEXT TO NET:
-- Each described action becomes one transition; model every action and drop none. But a list of checks or details inside one action ("inspect brakes: levers, calipers, pads") is that one action, not one transition each.
-- An exclusive choice (either/or) is a place with one outgoing arc per alternative.
-- The outcome of a condition ("approved", "authenticated", "passed", "retry limit exceeded") is never a node. The token waits in the one choice place, and the outcome is which alternative transition fires. Ids like p_authorization_approved, p_authenticated or p_tested are that mistake: they name a state the net already expresses, and no arc can legally reach them. A place that simply follows an activity (p_analyzed, p_geprueft) is the normal case and stays; only a place naming which branch was taken is wrong.
-- Parallel work (simultaneously/meanwhile) is a transition with one outgoing arc per branch.
-- Merges mirror splits: alternatives and loops rejoin at a place, where a token from any one branch continues; parallel branches synchronize at a transition that waits for all of them. Never merge alternatives at a transition: with several incoming arcs it fires only when every branch has a token, which deadlocks the net.
-- The arc counts alone carry these roles: a transition with exactly one incoming and one outgoing arc is a plain activity.
-- A split or join sits on the transition of the adjacent activity where the description has one; otherwise insert a transition without a <name>, which only routes the flow.
-- A repetition (again/until) is an arc from a transition back to the place where the repeated part starts.
-- Several possible endings (approved/rejected, success/failure, different outcomes) still share the one end place: every final transition points to it. Which ending occurred is shown by which transition fired, not by a separate end place.
-- Between two consecutive activities, and between phases, there is always a place; never join two places or two transitions directly. Model only what the description says.
+- The start place carries the single <initialMarking> with value 1.
+{SEMANTICS}
 
 METHOD:
-Plan before the XML, then build from the plan.
+Work the net out before you write the XML. Do not put any of this in your answer: the answer is the document alone.
 
-ACTIVITIES: the described actions in process order, one verb-object label per line (routing-only steps excluded).
+ACTIVITIES: the described actions in process order, one verb-object label each (routing-only steps excluded).
 
-BRANCHES: each branch point on one line: its cue, exclusive choice or parallel work, the node (by id) that carries the split, the branches it opens, and the node (by id) where they rejoin, naming the arc that carries each branch into it. A loop rejoins at the place its repeated part starts from. The XML never states any of this, so decide it here.
+BRANCHES: each branch point: its cue, exclusive choice or parallel work, the node (by id) that carries the split, the branches it opens, and the node (by id) where they rejoin, naming the arc that carries each branch into it. A loop rejoins at the place its repeated part starts from. The XML never states any of this, so decide it beforehand.
 
-FLOW: every arc of the net, one "source -> target" per line, in process order, back-edges last and marked. Build it from the two lists: join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and rejoin it exactly as that entry says. Never flatten a branching or looping process into one straight line.
+FLOW: every arc of the net as "source -> target", in process order, back-edges last. Build it from the two lists: join consecutive activities through a place, but where BRANCHES applies, split the flow (a choice at a place, parallel work at a transition) and rejoin it exactly as that entry says. Never flatten a branching or looping process into one straight line.
 
-Then the XML transcribes FLOW: one <arc> in the order of the FLOW lines, and no arc that FLOW does not list. Before finishing, check the FLOW list itself: every id from ACTIVITIES and BRANCHES occurs in it; every node except the start place occurs at least once as a target, and every node except the end place occurs at least once as a source; every transition occurs exactly once as a source and exactly once as a target, unless a BRANCHES entry marks it as parallel work.
+The XML then transcribes FLOW: one <arc> per FLOW entry, in that order, and no arc that FLOW does not list. Before writing it, check FLOW itself: every id from ACTIVITIES and BRANCHES occurs in it; every node except the start place occurs at least once as a target, and every node except the end place occurs at least once as a source; every transition occurs exactly once as a source and exactly once as a target, unless a BRANCHES entry marks it as parallel work.
 
 STYLE:
 - Activity transitions carry a concise verb-object label in the language of the description. Routing transitions and intermediate places need no name.
-- Keep the XML compact like the examples: one element per line, no indentation, no prose between the elements.
+- Keep the XML compact like the examples: one element per line, no indentation.
+- The answer begins with the XML declaration and ends with </pnml>. No prose, no explanation, no markdown fence, before, between or after the elements.
 
 EXAMPLES (they illustrate the mapping; always model the actual description):
 
 Description: "A customer reports an issue. The issue is analyzed. If a solution is found it is resolved, otherwise it is escalated and analyzed again."
 Answer:
-ACTIVITIES:
-- report issue
-- analyze issue
-- resolve issue
-- escalate issue
-BRANCHES:
-- "if a solution is found ... otherwise": exclusive choice on place p_analyzed, branches t_resolve_issue and t_escalate_issue; t_resolve_issue rejoins at place p_end via t_resolve_issue -> p_end
-- "analyzed again": repetition, t_escalate_issue rejoins at place p_reported via t_escalate_issue -> p_reported
-FLOW:
-- p_start -> t_report_issue
-- t_report_issue -> p_reported
-- p_reported -> t_analyze_issue
-- t_analyze_issue -> p_analyzed
-- p_analyzed -> t_resolve_issue
-- p_analyzed -> t_escalate_issue
-- t_resolve_issue -> p_end
-- t_escalate_issue -> p_reported (back-edge)
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
@@ -92,32 +62,6 @@ FLOW:
 
 Description: "Ein Mitarbeiter reicht einen Urlaubsantrag ein. Die Personalabteilung prüft den Antrag, während gleichzeitig das Zeitkonto aktualisiert wird. Danach wird das Ergebnis dokumentiert. Bei Genehmigung erhält der Mitarbeiter eine Bestätigung, andernfalls eine Ablehnung."
 Answer:
-ACTIVITIES:
-- urlaubsantrag einreichen
-- antrag prüfen
-- zeitkonto aktualisieren
-- ergebnis dokumentieren
-- bestätigung senden
-- ablehnung senden
-BRANCHES:
-- "während gleichzeitig": parallel work, split on transition t_antrag_einreichen, branches p_antrag_offen and p_zeitkonto_offen
-- "danach": the parallel branches rejoin on transition t_ergebnis_dokumentieren via p_geprueft -> t_ergebnis_dokumentieren and p_aktualisiert -> t_ergebnis_dokumentieren
-- "bei Genehmigung ... andernfalls": exclusive choice on place p_dokumentiert, branches t_bestaetigung_senden and t_ablehnung_senden; both rejoin at place p_end via t_bestaetigung_senden -> p_end and t_ablehnung_senden -> p_end
-FLOW:
-- p_start -> t_antrag_einreichen
-- t_antrag_einreichen -> p_antrag_offen
-- t_antrag_einreichen -> p_zeitkonto_offen
-- p_antrag_offen -> t_antrag_pruefen
-- p_zeitkonto_offen -> t_zeitkonto_aktualisieren
-- t_antrag_pruefen -> p_geprueft
-- t_zeitkonto_aktualisieren -> p_aktualisiert
-- p_geprueft -> t_ergebnis_dokumentieren
-- p_aktualisiert -> t_ergebnis_dokumentieren
-- t_ergebnis_dokumentieren -> p_dokumentiert
-- p_dokumentiert -> t_bestaetigung_senden
-- p_dokumentiert -> t_ablehnung_senden
-- t_bestaetigung_senden -> p_end
-- t_ablehnung_senden -> p_end
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
@@ -153,24 +97,6 @@ FLOW:
 
 Description: "Simultaneously, the goods are packed and the invoice is created. Afterwards the parcel is shipped."
 Answer:
-ACTIVITIES:
-- pack goods
-- create invoice
-- ship parcel
-BRANCHES:
-- "simultaneously": parallel work at the very start, no activity precedes it, so a routing transition t_split carries it, branches p_to_pack and p_to_invoice
-- "afterwards": the parallel branches rejoin on transition t_ship_parcel via p_packed -> t_ship_parcel and p_invoiced -> t_ship_parcel
-FLOW:
-- p_start -> t_split
-- t_split -> p_to_pack
-- t_split -> p_to_invoice
-- p_to_pack -> t_pack_goods
-- p_to_invoice -> t_create_invoice
-- t_pack_goods -> p_packed
-- t_create_invoice -> p_invoiced
-- p_packed -> t_ship_parcel
-- p_invoiced -> t_ship_parcel
-- t_ship_parcel -> p_end
 <?xml version="1.0" encoding="UTF-8"?>
 <pnml>
 <net id="noID" type="http://www.informatik.hu-berlin.de/top/pntd/ptNetb">
@@ -197,4 +123,4 @@ FLOW:
 </net>
 </pnml>
 
-Reply with the ACTIVITIES list, the BRANCHES list, the FLOW list, then exactly one well-formed PNML XML document, and nothing else.
+Reply with exactly one well-formed PNML XML document, and nothing else.

@@ -11,6 +11,11 @@ output, so downstream post-processing (coordinate assignment in t2p-2.0)
 keeps working. Validation issues remaining after the correction loop do
 not block delivery (best effort); they are reported in the CORS-exposed
 ``X-Validation-Issues`` response header.
+
+On the XML path the model writes that document and nothing else, so nothing
+is extracted from its reply and nothing is translated: what it answers is
+what the validator judges. The JSON path is the one place where a document
+is built rather than received; see :mod:`app.services.pnml_json`.
 """
 
 import logging
@@ -31,7 +36,11 @@ from app.api.routes import (
     _validate_generate_payload,
 )
 from app.services import model_registry
-from app.services.llm_service import EmptyResponseError, TruncatedResponseError
+from app.services.llm_service import (
+    PNML_FORMATS,
+    EmptyResponseError,
+    TruncatedResponseError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,18 +101,12 @@ def pnml_demo():
     return current_app.send_static_file("pnml_demo.html")
 
 
-@bp.route("/generate_pnml_direct", methods=["POST"])
-# Browser demo clients call this endpoint directly; expose the issues header
-# so cross-origin JavaScript may read it.
-@cross_origin(expose_headers=["X-Validation-Issues"])
-@swag_from(
-    {
+def _pnml_swagger(summary, description):
+    """The two direct endpoints differ in prose only; their contract is one."""
+    return {
         "tags": ["pnml-direct-experiment"],
-        "summary": "Generate PNML directly (experimental)",
-        "description": (
-            "Generate a PNML Petri net directly from process text via a "
-            "PNML-enriched prompt, bypassing the model-transformer."
-        ),
+        "summary": summary,
+        "description": description,
         "security": [{"bearerAuth": []}],
         "requestBody": {
             "required": True,
@@ -132,9 +135,16 @@ def pnml_demo():
             "500": {"description": "Upstream provider failure"},
         },
     }
-)
-def generate_pnml():
-    """Generate a PNML document directly from a process description."""
+
+
+def _generate_pnml_response(fmt, endpoint, prompt_key):
+    """Run one direct generation and render it under the shared contract.
+
+    The XML and the JSON path differ only in what the model is asked to write.
+    Auth, payload validation, the correction loop, the delivery rule (body is
+    pure PNML, remaining issues travel in the header), the debug view, the
+    error mapping and the metrics are the same for both, so they live here once.
+    """
     start_time = time.time()
     status = "200"
     try:
@@ -157,16 +167,18 @@ def generate_pnml():
             )
 
         logger.info(
-            "Invoking LLMService.generate_pnml (provider=%s, model=%s)",
+            "Invoking LLMService.generate_pnml (provider=%s, model=%s, fmt=%s)",
             provider,
             model,
+            fmt,
         )
         generation = _llm_service.generate_pnml(
             api_key=api_key,
             provider=provider,
             model=model,
             user_text=data["user_text"],
-            system_prompt=current_app.config["PNML_SYSTEM_PROMPT"],
+            system_prompt=current_app.config[prompt_key],
+            fmt=fmt,
         )
         best = generation.best
 
@@ -188,7 +200,8 @@ def generate_pnml():
             status = "400"
             excerpt = _reply_excerpt(getattr(e, "raw_reply", None))
             logger.warning(
-                "/generate_pnml_direct truncated at token limit: %s (reply: %s)",
+                "%s truncated at token limit: %s (reply: %s)",
+                endpoint,
                 e,
                 excerpt or "<empty>",
             )
@@ -207,20 +220,21 @@ def generate_pnml():
             status = "400"
             excerpt = _reply_excerpt(getattr(e, "raw_reply", None))
             logger.warning(
-                "/generate_pnml_direct rejected provider response: %s (reply: %s)",
+                "%s rejected provider response: %s (reply: %s)",
+                endpoint,
                 e,
                 excerpt or "<empty>",
             )
             return _v2_error(
                 400,
                 "invalid_request",
-                "The LLM provider returned no usable PNML document.",
+                f"The LLM provider returned no usable {PNML_FORMATS[fmt].artefact}.",
                 details=[f"Provider reply: {excerpt}"] if excerpt else None,
             )
 
         if _is_quota_error(e):
             status = "429"
-            logger.warning("/generate_pnml_direct provider quota exceeded: %s", e)
+            logger.warning("%s provider quota exceeded: %s", endpoint, e)
             return _v2_error(
                 429,
                 "rate_limited",
@@ -231,12 +245,47 @@ def generate_pnml():
             )
 
         status = "500"
-        logger.exception("/generate_pnml_direct failed: %s", e)
+        logger.exception("%s failed: %s", endpoint, e)
         return _v2_error(500, "upstream_error", "The LLM provider call failed.")
     finally:
         REQUEST_COUNT.labels(
-            method="POST", endpoint="/generate_pnml_direct", status=status
+            method="POST", endpoint=endpoint, status=status
         ).inc()
-        REQUEST_LATENCY.labels(method="POST", endpoint="/generate_pnml_direct").observe(
+        REQUEST_LATENCY.labels(method="POST", endpoint=endpoint).observe(
             time.time() - start_time
         )
+
+
+# Browser demo clients call these endpoints directly; expose the issues header
+# so cross-origin JavaScript may read it.
+@bp.route("/generate_pnml_direct", methods=["POST"])
+@cross_origin(expose_headers=["X-Validation-Issues"])
+@swag_from(
+    _pnml_swagger(
+        "Generate PNML directly (experimental)",
+        "Generate a PNML Petri net directly from process text via a "
+        "PNML-enriched prompt, bypassing the model-transformer. The model "
+        "writes the PNML document itself.",
+    )
+)
+def generate_pnml():
+    """Generate a PNML document directly from a process description."""
+    return _generate_pnml_response("xml", "/generate_pnml_direct", "PNML_SYSTEM_PROMPT")
+
+
+@bp.route("/generate_pnml_direct_json", methods=["POST"])
+@cross_origin(expose_headers=["X-Validation-Issues"])
+@swag_from(
+    _pnml_swagger(
+        "Generate PNML via a JSON net (experimental)",
+        "Same direct path, without the model-transformer and without BPMN: the "
+        "model answers with a schema-constrained JSON net, which this service "
+        "serializes to PNML. Well-formedness, unique ids, arc ids and the "
+        "initial marking are therefore construction, not validation.",
+    )
+)
+def generate_pnml_json():
+    """Generate PNML from a schema-constrained JSON net."""
+    return _generate_pnml_response(
+        "json", "/generate_pnml_direct_json", "PNML_JSON_SYSTEM_PROMPT"
+    )

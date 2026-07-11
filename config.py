@@ -16,6 +16,20 @@ def _load_system_prompt_from_txt():
     return _load_prompt_from_txt("zero-shot-prompts", "00_zero_shot_prompt.txt")
 
 
+def _load_pnml_prompt(file_name):
+    """Load a direct-PNML prompt, splicing in the shared modelling semantics.
+
+    The XML and the JSON path must model a process identically; only their
+    output format differs. Keeping the rules in one file and substituting them
+    into both prompts makes that structural rather than a promise nobody
+    checks: a rule can no longer be improved on one path and forgotten on the
+    other.
+    """
+    template = _load_prompt_from_txt("pnml-prompts", file_name)
+    semantics = _load_prompt_from_txt("pnml-prompts", "_pnml_semantics.txt")
+    return template.replace("{SEMANTICS}", semantics)
+
+
 def _env_bool(name, default=False):
     """Parse common truthy/falsey string values from environment."""
     value = os.environ.get(name)
@@ -27,10 +41,10 @@ def _env_bool(name, default=False):
 # === Base Configuration ===
 class BaseConfig:
     SYSTEM_PROMPT = _load_system_prompt_from_txt()
-    # System prompt for the experimental direct text-to-PNML endpoint.
-    PNML_SYSTEM_PROMPT = _load_prompt_from_txt(
-        "pnml-prompts", "00_pnml_system_prompt.txt"
-    )
+    # System prompts for the two experimental direct text-to-PNML endpoints:
+    # the model writes the PNML itself, or a JSON net this service serializes.
+    PNML_SYSTEM_PROMPT = _load_pnml_prompt("00_pnml_system_prompt.txt")
+    PNML_JSON_SYSTEM_PROMPT = _load_pnml_prompt("01_pnml_json_system_prompt.txt")
     # Optional provider hosts/base URLs (useful for proxies, gateways, or
     # enterprise endpoints).
     OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_HOST")

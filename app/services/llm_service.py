@@ -1,24 +1,55 @@
 import json
 import logging
-import re
 import time
 from collections import namedtuple
 
 import google.generativeai as genai
+from google import genai as new_genai
 from flask import current_app
 from openai import OpenAI
 
 from app.services import model_registry
 from app.services.model_validator import ModelValidator
-from app.services.pnml_validator import PnmlValidator
+from app.services.pnml_json import (
+    PetriNet,
+    extract_json_document,
+    pnml_from_json,
+)
+from app.services.pnml_validator import PnmlValidator, hints_for
 from app.utils.prompt_builder import PromptBuilder, STRICT_JSON_REMINDER
 
 #: One pass of the direct-PNML correction loop, after normalization.
 PnmlAttempt = namedtuple("PnmlAttempt", "pnml issues stripped counts")
 
-#: Tokens billed for one provider call. On reasoning models the hidden thinking
-#: is part of ``output``, which is also how it is billed.
-TokenUsage = namedtuple("TokenUsage", "input output total")
+#: Tokens billed for one provider call, split along the lines that carry
+#: different prices: cached input is cheaper than fresh input, output is dearer
+#: than either, and hidden thinking is billed at the output rate. The two
+#: sub-counts are contained in their parent -- ``cached_input`` in ``input``,
+#: ``reasoning`` in ``output`` -- so every field stays additive across calls.
+TokenUsage = namedtuple("TokenUsage", "input cached_input output reasoning total")
+
+
+def _token_usage(input_tokens, cached_input, reasoning, total):
+    """Assemble a usage, deriving output as everything that is not input.
+
+    Derived rather than read off the reply, because the providers disagree on
+    whether hidden thinking is already part of their output count: it is for
+    OpenAI's ``completion_tokens``, while Gemini's ``candidates_token_count``
+    excludes it on Vertex AI and includes it on the Gemini API. ``total`` minus
+    the input is billed at the output rate under either reading.
+    """
+    return TokenUsage(
+        input=input_tokens,
+        cached_input=cached_input,
+        output=total - input_tokens,
+        reasoning=reasoning,
+        total=total,
+    )
+
+
+def _sub_count(usage, group, field):
+    """A usage sub-count, 0 where the provider omits it: it billed none."""
+    return getattr(getattr(usage, group, None), field, None) or 0
 
 
 def _openai_token_usage(chat_completion):
@@ -26,7 +57,12 @@ def _openai_token_usage(chat_completion):
     usage = getattr(chat_completion, "usage", None)
     if usage is None:
         return None
-    return TokenUsage(usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+    return _token_usage(
+        input_tokens=usage.prompt_tokens,
+        cached_input=_sub_count(usage, "prompt_tokens_details", "cached_tokens"),
+        reasoning=_sub_count(usage, "completion_tokens_details", "reasoning_tokens"),
+        total=usage.total_tokens,
+    )
 
 
 def _gemini_token_usage(response):
@@ -34,8 +70,11 @@ def _gemini_token_usage(response):
     usage = getattr(response, "usage_metadata", None)
     if usage is None:
         return None
-    return TokenUsage(
-        usage.prompt_token_count, usage.candidates_token_count, usage.total_token_count
+    return _token_usage(
+        input_tokens=usage.prompt_token_count,
+        cached_input=getattr(usage, "cached_content_token_count", None) or 0,
+        reasoning=getattr(usage, "thoughts_token_count", None) or 0,
+        total=usage.total_token_count,
     )
 
 
@@ -77,21 +116,70 @@ class PnmlGeneration(namedtuple("PnmlGeneration", "attempts best_index usages"))
         return self.usages[index] if index < len(self.usages) else None
 
 
-_PNML_BLOCK_RE = re.compile(r"<pnml\b.*?</pnml>", re.DOTALL | re.IGNORECASE)
+def _pnml_from_xml_reply(reply):
+    """The reply itself, or None when the model said nothing.
+
+    On this path the model is asked for the PNML document and nothing else, so
+    there is nothing to extract: the reply goes to the validator as it stands.
+    Prose or a markdown fence around it is not a wrapper to be cut away but a
+    violated instruction, and the validator's first gate says so.
+    """
+    reply = (reply or "").strip()
+    return reply or None
+
+
+def _pnml_from_json_reply(reply):
+    """The PNML built from the JSON net a reply carries, or None."""
+    payload = extract_json_document(reply)
+    return None if payload is None else pnml_from_json(payload)
+
+
+#: What separates the two direct-PNML paths, and nothing else: everything after
+#: ``to_pnml`` -- validator, correction loop, delivery contract, debug payload --
+#: is shared. ``to_pnml`` turns a reply into the document the validator sees; on
+#: the XML path the model already wrote it, so that step is the identity.
+#:
+#: ``schema`` is the Pydantic class the provider must constrain its answer to,
+#: or None for a free-text answer. It is the one place a path says "the reply is
+#: JSON": each provider adapter compiles it into its own dialect, and a schema
+#: also means a repair prompt echoes the model's own reply back instead of the
+#: PNML this service derived from it.
+_PnmlFormat = namedtuple("_PnmlFormat", "artefact instruction to_pnml schema")
+
+PNML_FORMATS = {
+    "xml": _PnmlFormat(
+        artefact="PNML document",
+        instruction="Return exactly one well-formed PNML XML document and nothing else.\n",
+        to_pnml=_pnml_from_xml_reply,
+        schema=None,
+    ),
+    "json": _PnmlFormat(
+        artefact="JSON net",
+        instruction="Return exactly one JSON object matching the required schema and nothing else.\n",
+        to_pnml=_pnml_from_json_reply,
+        schema=PetriNet,
+    ),
+}
 
 # Correction budget for the direct-PNML path: one generation plus up to
 # three correction passes (all at temperature 0; the prompt changes between
 # passes because it carries the previous document and its issues).
 _PNML_MAX_CORRECTIONS = 3
 
-# Output budget for the direct-PNML path only. The /generate defaults are too
-# small here: a full PNML document is far longer than the standard path's BPMN
-# JSON, and on GPT-5 variants reasoning tokens draw from the same budget. At
-# "medium" reasoning on a long process, 16384 was fully consumed by reasoning
-# on some models, yielding an empty reply; 32768 leaves room for reasoning and
-# the net. Gemini is capped at 8192, the hard output limit of gemini-2.0-flash.
-_PNML_OPENAI_MAX_COMPLETION_TOKENS = 32768
-_PNML_GEMINI_MAX_OUTPUT_TOKENS = 8192
+# One output budget for the direct-PNML path, both providers. The /generate
+# defaults are too small here: a full PNML document is far longer than the
+# standard path's BPMN JSON, and on GPT-5 variants reasoning tokens draw from
+# the same budget. At "medium" reasoning on a long process, 16384 was fully
+# consumed by reasoning on some models, yielding an empty reply; 32768 leaves
+# room for reasoning and the net.
+_PNML_MAX_OUTPUT_TOKENS = 32768
+
+# What a budget cannot equalize: a model's own ceiling. gemini-2.0-flash stops
+# at 8192 output tokens, so asking for more is not a larger budget but a
+# rejected request. The cap is applied per provider and logged when it bites,
+# because a Gemini net truncating where an OpenAI net does not is this limit
+# speaking, not the model being worse.
+_GEMINI_HARD_OUTPUT_LIMIT = 8192
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +208,18 @@ class TruncatedResponseError(ValueError):
     def __init__(self, *args, raw_reply=None):
         super().__init__(*args)
         self.raw_reply = raw_reply
+
+
+def _as_base_url(endpoint):
+    """A configured Gemini host as the base URL the unified SDK expects.
+
+    ``GEMINI_API_ENDPOINT`` is a bare host ("generativelanguage.googleapis.com"):
+    the deprecated SDK took it as ``client_options={"api_endpoint": ...}``, while
+    ``HttpOptions.base_url`` needs a scheme. Values that already carry one pass
+    through, so an http:// proxy stays http://.
+    """
+    endpoint = endpoint.strip().rstrip("/")
+    return endpoint if "://" in endpoint else f"https://{endpoint}"
 
 
 def _is_truncation_reason(finish_reason):
@@ -166,23 +266,6 @@ class LLMService:
         return json.loads(content[start:end + 1])
 
     @staticmethod
-    def _extract_pnml_document(text):
-        """Extract the PNML XML document from model output text.
-
-        Counterpart of ``_extract_json_object`` for the direct-PNML path:
-        replies may wrap the XML in markdown fences or surrounding prose
-        despite the system prompt forbidding it. Returns the
-        ``<pnml>...</pnml>`` block with an XML declaration, or ``None`` if
-        the reply contains none.
-        """
-        if not text:
-            return None
-        match = _PNML_BLOCK_RE.search(text)
-        if match is None:
-            return None
-        return f'<?xml version="1.0" encoding="UTF-8"?>\n{match.group(0)}'
-
-    @staticmethod
     def _merge_known_elements(partials):
         """Merge step outputs into known elements map by preserving first-seen IDs."""
         merged = {"events": [], "tasks": [], "gateways": []}
@@ -218,7 +301,7 @@ class LLMService:
             f"{model_block}\n"
         )
 
-    def _build_pnml_repair_prompt(self, user_text, pnml_xml, issues):
+    def _build_pnml_repair_prompt(self, user_text, previous, issues, fmt="xml"):
         """Create a correction prompt from PNML validation findings.
 
         Counterpart of ``_build_repair_prompt`` for the direct-PNML path.
@@ -226,34 +309,38 @@ class LLMService:
         the model does not drift away from the described process just to
         satisfy the validator) and demands a minimal change (so correct
         parts survive the correction).
+
+        It states only what holds *while repairing*. The modelling rules are
+        not restated here: the system prompt carries them on every call, this
+        one included, and a second copy would be one that can drift. What the
+        findings do bring with them are their hints -- the constraints a fix
+        must respect -- and only those of the checks that actually fired, so
+        the prompt never warns about a defect the net does not have.
+
+        Shared by both direct paths: the findings name the net rather than the
+        document, so only the artefact the model is asked to return differs.
         """
+        pnml_format = PNML_FORMATS[fmt]
         issues_block = "\n".join(f"- {issue}" for issue in issues)
+        hints_block = "".join(f"{hint}\n" for hint in hints_for(issues))
         return (
-            "Your previous PNML document for the process description below "
-            "violates structural rules.\n"
+            f"Your previous {pnml_format.artefact} for the process description "
+            "below violates structural rules.\n"
             "Produce a corrected version of THIS document. Change as little "
             "as possible: fix exactly the listed issues and keep all correct "
             "parts (ids, names, structure) unchanged. The corrected document "
-            "must still model the described process. Adding a node that a "
-            "listed issue cannot be fixed without is a minimal change.\n"
-            "A node reported as having no arcs models nothing. Arcs alternate "
-            "between places and transitions, so a place is reconnected from a "
-            "transition and a transition from a place: never join two places "
-            "or two transitions to attach it; where the flow has no legal "
-            "neighbour, insert the transition or place the connection needs.\n"
-            "If the node names the outcome of a condition ('approved', "
-            "'authenticated', 'passed'), the net has no room for it: the "
-            "outcome is which transition fires at the choice place. Delete it "
-            "and route the alternatives from that place instead.\n"
-            "Do not return a reported node unchanged.\n"
-            "Return exactly one well-formed PNML XML document and nothing "
-            "else.\n\n"
+            "must still model the described process.\n"
+            "Do not return a reported node unchanged, and do not delete one "
+            "merely to satisfy a rule: an activity the description names must "
+            "survive the correction.\n"
+            f"{hints_block}"
+            f"{pnml_format.instruction}\n"
             "Process description:\n"
             f"{user_text}\n\n"
             "Validation issues to fix:\n"
             f"{issues_block}\n\n"
-            "Your previous PNML:\n"
-            f"{pnml_xml}\n"
+            f"Your previous {pnml_format.artefact}:\n"
+            f"{previous}\n"
         )
 
     @staticmethod
@@ -521,6 +608,7 @@ class LLMService:
         prompt,
         max_completion_tokens=4096,
         usage_sink=None,
+        schema=None,
     ):
         model_name = (model or "").lower()
         request_kwargs = {
@@ -531,12 +619,22 @@ class LLMService:
             "model": model,
             "max_completion_tokens": max_completion_tokens,
         }
-        # GPT-5 variants can reject explicit temperature values and only accept
-        # provider defaults. Avoid first-attempt 400s by omitting it up front.
+        # A Pydantic schema goes through `parse`, which compiles it into a
+        # strict JSON schema; `create` only accepts a pre-built dict. The reply
+        # is read as text either way, so both branches return the same thing.
+        if schema is not None:
+            request_kwargs["response_format"] = schema
+            send = client.beta.chat.completions.parse
+        else:
+            send = client.chat.completions.create
+        # Temperature 0 is greedy decoding on OpenAI; top_p needs no pinning, it
+        # defaults to 1.0. GPT-5 variants reject an explicit temperature and only
+        # accept the provider default, so it is omitted up front to avoid a 400 --
+        # those models are not greedy, and no request parameter can make them be.
         if not model_name.startswith("gpt-5"):
             request_kwargs["temperature"] = 0
         try:
-            chat_completion = client.chat.completions.create(**request_kwargs)
+            chat_completion = send(**request_kwargs)
         except Exception as e:
             # Some OpenAI models (for example GPT-5 variants) only accept the
             # default temperature and reject an explicit value.
@@ -547,8 +645,11 @@ class LLMService:
                     model,
                 )
                 request_kwargs.pop("temperature", None)
-                chat_completion = client.chat.completions.create(**request_kwargs)
+                chat_completion = send(**request_kwargs)
             else:
+                # A model that cannot honour the requested response format is
+                # the wrong model for this endpoint. Say so; do not quietly
+                # generate under weaker constraints than the caller asked for.
                 raise
 
         first_choice = chat_completion.choices[0] if chat_completion.choices else None
@@ -600,17 +701,79 @@ class LLMService:
         return content
 
     @staticmethod
-    def _gemini_generate_once(
-        gen_model, prompt, max_output_tokens=2048, usage_sink=None
+    def _gemini_pnml_generate_once(
+        client, system_prompt, model, prompt, max_output_tokens, usage_sink=None, schema=None
     ):
+        """The direct-PNML path's Gemini call, mirroring ``_openai_generate_once``.
+
+        On the unified ``google-genai`` SDK rather than the deprecated
+        ``google-generativeai`` the standard path still uses. Two reasons, both
+        load-bearing here: only this SDK compiles a Pydantic class into a
+        provider schema -- including ``property_ordering``, without which the
+        model may write the arcs before the plan that is supposed to govern them
+        -- and its per-call client replaces a process-wide ``genai.configure``,
+        which under concurrent requests carrying different API keys was a race.
+
+        Symmetric with the OpenAI adapter by design: same budget, greedy
+        decoding, tokens recorded before a reply is judged, and truncation
+        checked before emptiness -- a reply cut off at the token limit is
+        exhausted budget, not a refusal, even when nothing came back with it.
+        """
+        config = {
+            "system_instruction": system_prompt,
+            # Greedy decoding. Unlike OpenAI, Gemini needs top_k/top_p pinned
+            # explicitly for temperature 0 to mean "always the likeliest token".
+            "temperature": 0.0,
+            "top_k": 1,
+            "top_p": 1.0,
+            "max_output_tokens": max_output_tokens,
+        }
+        if schema is not None:
+            config["response_mime_type"] = "application/json"
+            config["response_schema"] = schema
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=new_genai.types.GenerateContentConfig(**config),
+        )
+        # Recorded before the checks below; see _openai_generate_once.
+        if usage_sink is not None:
+            usage_sink.append(_gemini_token_usage(response))
+
+        text = ((getattr(response, "text", None)) or "").strip()
+        candidates = getattr(response, "candidates", None) or []
+        finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+        if _is_truncation_reason(finish_reason):
+            logger.warning(
+                "Gemini stopped at the token limit (model=%s, content_len=%d)",
+                model,
+                len(text),
+            )
+            raise TruncatedResponseError(
+                "Gemini reached its output token limit. Try a shorter process "
+                "description or a model with a larger output budget.",
+                raw_reply=text,
+            )
+        if not text:
+            logger.warning(
+                "Gemini returned empty response text (model=%s, finish_reason=%s)",
+                model,
+                finish_reason,
+            )
+            raise EmptyResponseError("Gemini returned empty response text.")
+        return text
+
+    @staticmethod
+    def _gemini_generate_once(gen_model, prompt, max_output_tokens=2048, usage_sink=None):
+        config_kwargs = {
+            "temperature": 0.0,
+            "top_k": 1,
+            "top_p": 1.0,
+            "max_output_tokens": max_output_tokens,
+        }
         response = gen_model.generate_content(
             prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.0,
-                top_k=1,
-                top_p=1.0,
-                max_output_tokens=max_output_tokens,
-            ),
+            generation_config=genai.types.GenerationConfig(**config_kwargs),
         )
         # Recorded before the checks below; see _openai_generate_once.
         if usage_sink is not None:
@@ -821,8 +984,13 @@ class LLMService:
             model=model,
         )
 
-    def generate_pnml(self, api_key, provider, model, user_text, system_prompt):
+    def generate_pnml(self, api_key, provider, model, user_text, system_prompt, fmt="xml"):
         """Experimental direct text-to-PNML entry point for ``/generate_pnml_direct``.
+
+        ``fmt`` selects what the model is asked to write: ``"xml"`` for the PNML
+        document itself, ``"json"`` for a schema-constrained JSON net that this
+        service serializes. Both then share this correction loop, the validator
+        and the delivery contract; see :mod:`app.services.pnml_json`.
 
         Parallel to ``generate``: same provider dispatch, but one bare provider
         call with the PNML system prompt and the raw user text: no
@@ -839,6 +1007,7 @@ class LLMService:
         exposes them in the ``X-Validation-Issues`` response header.
         """
         usages = []
+        pnml_format = PNML_FORMATS[fmt]
         method_name = model_registry.dispatch_method(provider)
         if method_name == "call_openai":
             client_kwargs = {"api_key": api_key}
@@ -853,26 +1022,39 @@ class LLMService:
                     system_prompt,
                     model,
                     prompt,
-                    max_completion_tokens=_PNML_OPENAI_MAX_COMPLETION_TOKENS,
+                    max_completion_tokens=_PNML_MAX_OUTPUT_TOKENS,
                     usage_sink=usages,
+                    schema=pnml_format.schema,
                 )
 
         elif method_name == "call_gemini":
-            genai_kwargs = {"api_key": api_key}
+            client_kwargs = {"api_key": api_key}
             gemini_api_endpoint = self._config_value("GEMINI_API_ENDPOINT")
             if gemini_api_endpoint:
-                genai_kwargs["client_options"] = {"api_endpoint": gemini_api_endpoint}
-            genai.configure(**genai_kwargs)
-            gen_model = genai.GenerativeModel(
-                model_name=model, system_instruction=system_prompt
-            )
+                client_kwargs["http_options"] = new_genai.types.HttpOptions(
+                    base_url=_as_base_url(gemini_api_endpoint)
+                )
+            client = new_genai.Client(**client_kwargs)
+            # The shared budget, capped at what the model can actually emit.
+            budget = min(_PNML_MAX_OUTPUT_TOKENS, _GEMINI_HARD_OUTPUT_LIMIT)
+            if budget < _PNML_MAX_OUTPUT_TOKENS:
+                logger.info(
+                    "Gemini output budget capped at %d of %d tokens (model=%s); "
+                    "a long process may truncate here where OpenAI would not",
+                    budget,
+                    _PNML_MAX_OUTPUT_TOKENS,
+                    model,
+                )
 
             def generate_once(prompt):
-                return self._gemini_generate_once(
-                    gen_model,
+                return self._gemini_pnml_generate_once(
+                    client,
+                    system_prompt,
+                    model,
                     prompt,
-                    max_output_tokens=_PNML_GEMINI_MAX_OUTPUT_TOKENS,
+                    max_output_tokens=budget,
                     usage_sink=usages,
+                    schema=pnml_format.schema,
                 )
 
         else:
@@ -891,10 +1073,10 @@ class LLMService:
             )
 
         reply = generate_once(user_text)
-        raw = self._extract_pnml_document(reply)
+        raw = pnml_format.to_pnml(reply)
         if raw is None:
             raise EmptyResponseError(
-                "Provider reply contained no PNML document.", raw_reply=reply
+                f"Provider reply contained no {pnml_format.artefact}.", raw_reply=reply
             )
 
         # Correction loop: up to _PNML_MAX_CORRECTIONS passes, each carrying
@@ -905,6 +1087,9 @@ class LLMService:
         # Every pass is recorded: the raw history is the only place where the
         # model's unaided first shot, and any shrinkage along the way, survive.
         attempts = [attempt(raw)]
+        # What the next repair prompt echoes back. On the JSON path that is the
+        # model's own object, not the PNML this service derived from it.
+        last_reply = reply
         best_index = 0
         previous_issues = None
         while attempts[-1].issues and len(attempts) <= _PNML_MAX_CORRECTIONS:
@@ -912,57 +1097,72 @@ class LLMService:
             if current.issues == previous_issues:
                 logger.warning(
                     "PNML correction made no progress (identical issues); "
-                    "stopping after %d correction(s)",
+                    "stopping after %d correction(s) (model=%s)",
                     len(attempts) - 1,
+                    model,
                 )
                 break
             previous_issues = current.issues
 
             logger.info(
-                "PNML correction attempt %d/%d for %d issue(s)",
+                "PNML correction attempt %d/%d for %d issue(s) (model=%s)",
                 len(attempts),
                 _PNML_MAX_CORRECTIONS,
                 len(current.issues),
+                model,
             )
+            # A schema-constrained path echoes the model's own object back:
+            # showing it the PNML we derived would invite an answer in a format
+            # the schema forbids. Without one, the reply IS the document, and
+            # the normalized version is the better thing to correct.
+            previous = last_reply if pnml_format.schema else current.pnml
             repair_prompt = self._build_pnml_repair_prompt(
-                user_text, current.pnml, current.issues
+                user_text, previous, current.issues, fmt
             )
             try:
-                corrected = self._extract_pnml_document(generate_once(repair_prompt))
-            except TruncatedResponseError:
-                # A truncated repair has nothing to add; keep the best attempt
-                # so far rather than discarding it. Truncation on the initial
-                # generation still raises, as there is nothing to fall back to.
+                reply = generate_once(repair_prompt)
+                corrected = pnml_format.to_pnml(reply)
+            except (TruncatedResponseError, EmptyResponseError) as correction_err:
+                # A truncated or empty repair has nothing to add; keep the best
+                # attempt so far rather than discarding it. On the initial
+                # generation both still raise, as there is nothing to fall back
+                # to.
                 logger.warning(
-                    "PNML correction truncated at the token limit; "
-                    "keeping the previous attempt"
+                    "PNML correction failed (%s); keeping the previous "
+                    "attempt (model=%s)",
+                    correction_err,
+                    model,
                 )
                 break
             if corrected is None:
                 logger.warning(
-                    "PNML correction reply contained no PNML document; "
-                    "keeping the previous attempt"
+                    "PNML correction reply contained no %s; "
+                    "keeping the previous attempt (model=%s)",
+                    pnml_format.artefact,
+                    model,
                 )
                 break
 
+            last_reply = reply
             attempts.append(attempt(corrected))
             if len(attempts[-1].issues) < len(attempts[best_index].issues):
                 best_index = len(attempts) - 1
 
-        return self._finish_pnml_generation(attempts, best_index, usages)
+        return self._finish_pnml_generation(attempts, best_index, usages, model)
 
     @staticmethod
-    def _finish_pnml_generation(attempts, best_index, usages):
+    def _finish_pnml_generation(attempts, best_index, usages, model):
         """Log what the history reveals and wrap it into the result."""
         first, best = attempts[0], attempts[best_index]
 
         if best.issues:
             logger.warning(
                 "PNML validation found %d remaining issue(s) after %d "
-                "correction(s): %s",
+                "correction(s): %s (model=%s)",
                 len(best.issues),
                 len(attempts) - 1,
                 "; ".join(best.issues),
+                model,
             )
 
         # Structural validity is bought with nodes: the correction loop selects
@@ -975,9 +1175,28 @@ class LLMService:
         ):
             logger.warning(
                 "PNML correction shrank the net: %s -> %s (places, transitions, "
-                "arcs); the delivered net may have lost part of the process",
+                "arcs); the delivered net may have lost part of the process "
+                "(model=%s)",
                 tuple(first.counts),
                 tuple(best.counts),
+                model,
             )
 
-        return PnmlGeneration(attempts, best_index, usages)
+        generation = PnmlGeneration(attempts, best_index, usages)
+        # One line carrying what an after-the-fact analysis of a run needs, so a
+        # generation need not be reconstructed from the interleaved lines above:
+        # how the issue count moved from the unaided first attempt to the last,
+        # which attempt was delivered (a low index next to a long trail means
+        # the later passes were paid for and discarded), and what it cost.
+        logger.info(
+            "PNML generation done (model=%s, issues=%s, delivered=attempt %d of "
+            "%d, calls=%d, net=%s, tokens=%s)",
+            model,
+            [len(a.issues) for a in attempts],
+            best_index,
+            len(attempts) - 1,
+            len(usages),
+            tuple(best.counts),
+            generation.tokens,
+        )
+        return generation

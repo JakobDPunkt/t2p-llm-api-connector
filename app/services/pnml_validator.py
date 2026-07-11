@@ -27,17 +27,31 @@ model's cosmetic habits, paid for with zero LLM calls.
 
 Gating is limited to what genuinely invalidates further checking; everything
 else is collected into ONE combined issue list so a single correction pass can
-fix as many real issues as possible. Behavioural soundness (token game
-analysis) is deliberately out of scope.
+fix as many real issues as possible. Behavioural soundness IS in scope, but only
+once the structure is clean: a bounded token game (:meth:`_check_soundness`) then
+reports transitions that can never fire, places that accumulate tokens, and runs
+that cannot complete -- the deadlocks that pass every structural check yet leave
+the net unrunnable. Beyond a short time budget it stays silent rather than guess.
 
 Issue messages name the offending element and state the violated rule, and
 stop there: naming a repair would point the correction at one of several
-possible causes, and the model is better placed to pick between them.
+possible causes, and the model is better placed to pick between them. What a
+finding may carry is a ``hint``: not the repair, but the constraint the repair
+must respect, so a correction pass cannot fix one rule by breaking another.
+Hints live on the check that produces them and reach the LLM only when that
+check fired; see :class:`Issue`.
+
+Findings name the net, not the document: a node by its id, an arc by its two
+endpoints. Both representations of the direct path -- the PNML the model wrote
+itself, and the JSON net this service serialized -- declare exactly those, so
+one finding is actionable in either. Only the gates and the prerequisites,
+which no JSON net can violate, speak of elements and attributes.
 
 XML namespaces are tolerated throughout (matching the namespace-agnostic
 downstream parsers): elements are matched by local name.
 """
 
+import time
 import xml.etree.ElementTree as ET
 from collections import namedtuple
 
@@ -54,6 +68,95 @@ _STRIPPED_ELEMENTS = {
     "toolspecific": "native standard PNML only, no tool-specific blocks",
     "inscription": "arc inscriptions are not part of the contract",
 }
+
+class Issue(str):
+    """A structural finding, and the constraints a correction must respect.
+
+    The string is the finding the model reads; ``hints`` are the sentences the
+    repair prompt adds when this check fired, and nothing when it did not. They
+    sit here rather than in the prompt because a rule and the trap that comes
+    with fixing it belong together: neither can be improved without the other
+    coming along.
+
+    Subclassing ``str`` keeps a finding a finding: it joins into the response
+    header, serializes into the debug view and compares between passes exactly
+    as the plain strings the gates still return.
+    """
+
+    def __new__(cls, text, *hints):
+        issue = super().__new__(cls, text)
+        issue.hints = hints
+        return issue
+
+
+def hints_for(issues):
+    """The hints of the findings at hand, deduplicated, in order of appearance.
+
+    Plain strings carry none, so a gate finding contributes nothing.
+    """
+    return list(
+        dict.fromkeys(
+            hint for issue in issues for hint in getattr(issue, "hints", ())
+        )
+    )
+
+
+#: Both directions of the alternation rule are one trap: a node is reconnected
+#: through a neighbour of the other kind, and where none exists it must be
+#: created. Without this, a correction pass satisfies "connect p_x" by drawing
+#: an arc to the nearest place and reports back a net with a new defect.
+_HINT_ALTERNATION = (
+    "Arcs alternate between places and transitions, so a place is reconnected "
+    "from a transition and a transition from a place: never join two places or "
+    "two transitions to attach one. Where the flow offers no legal neighbour, "
+    "insert the transition or place the connection needs; that insertion is a "
+    "minimal change, not an addition to the process."
+)
+
+#: The one node kind that must be deleted rather than reconnected. Named only
+#: when a node is actually unreachable or disconnected, because sent
+#: unprompted it invites the deletion of the ordinary post-activity places
+#: (p_analyzed, p_geprueft) that look superficially alike.
+_HINT_CONDITION_OUTCOME = (
+    "If a reported node names the outcome of a condition ('approved', "
+    "'authenticated', 'passed', 'retry limit exceeded'), the net has no room "
+    "for it: the outcome is which transition fires at the choice place. Delete "
+    "it and route the alternatives from that place instead. A place that "
+    "merely follows an activity is the normal case and stays."
+)
+
+#: The one trap of the soundness checks: a transition joins what is not parallel.
+#: A loop back or an alternative merged into a transition makes it wait forever
+#: for a token that only ever arrives on one of its inputs. Sent whenever the
+#: token game finds a transition that can never fire or a run that cannot finish.
+_HINT_SYNC_MERGE = (
+    "A transition fires only when every incoming arc carries a token at the same "
+    "moment. A branch that is an alternative (only one runs) or a loop back must "
+    "therefore rejoin at the PLACE that feeds the transition on its forward path, "
+    "giving that transition a single incoming arc -- never point the loop or the "
+    "alternative into the transition itself. Only genuinely parallel branches, "
+    "split off earlier by one transition, may be joined at a transition."
+)
+
+#: For a place that collects more than one token: the mirror of the above.
+_HINT_ACCUMULATE = (
+    "Alternatives must not both feed one place either -- they rejoin at a place "
+    "that then continues once. Parallel branches must synchronize at a joining "
+    "transition that consumes one token from each; a place that several branches "
+    "deposit into just piles the tokens up and never clears."
+)
+
+#: A surplus end place is almost never a second real ending; it is usually a
+#: step whose continuation was dropped (the happy path that stops where it
+#: should hand on). Named only for extra sinks, so the fix is to reconnect, not
+#: to merge distinct outcomes or delete the place to satisfy the count.
+_HINT_DEAD_END = (
+    "A place with incoming but no outgoing arcs stops the flow there. If that is "
+    "not where the process ends, a continuation is missing: route it onward to the "
+    "step that actually follows it. Only a branch that genuinely ends belongs on "
+    "the single end place -- do not send every dead end straight to the end, and "
+    "do not delete the place just to satisfy the count."
+)
 
 #: Size of the net. Zero throughout when the document did not pass the gates.
 NetCounts = namedtuple("NetCounts", "places transitions arcs")
@@ -151,7 +254,12 @@ class PnmlValidator:
         if prerequisite_issues:
             return PnmlCheck(pnml, stripped, prerequisite_issues, counts)
 
-        return PnmlCheck(pnml, stripped, self._check_graph_structure(net), counts)
+        structure_issues = self._check_graph_structure(net)
+        if structure_issues:
+            return PnmlCheck(pnml, stripped, structure_issues, counts)
+
+        # The graph is a well-formed workflow net; only now can the token game run.
+        return PnmlCheck(pnml, stripped, self._check_soundness(net), counts)
 
     # --- Gates ---------------------------------------------------------------
 
@@ -311,22 +419,24 @@ class PnmlValidator:
         outgoing = {}
         seen_connections = set()
         for arc in _iter_local(net, "arc"):
-            arc_id = arc.get("id")
             source = arc.get("source")
             target = arc.get("target")
+            # Named by its endpoints, never by its id: on the JSON path the id
+            # is derived during serialization, so the model would be sent
+            # looking for an 'a7' it never wrote.
+            arc_name = f"the arc from '{source}' to '{target}'"
 
             if source == target:
                 issues.append(
-                    f"arc '{arc_id}' connects '{source}' to itself; arcs "
-                    "must connect two different nodes"
+                    f"{arc_name} connects a node to itself; arcs must connect "
+                    "two different nodes"
                 )
             unresolved = False
             for role, ref in (("source", source), ("target", target)):
                 if ref not in node_ids:
                     issues.append(
-                        f"arc '{arc_id}' references unknown {role} '{ref}'; "
-                        "every arc must reference an existing place or "
-                        "transition"
+                        f"{arc_name} references unknown {role} '{ref}'; every "
+                        "arc must reference an existing place or transition"
                     )
                     unresolved = True
             if unresolved:
@@ -334,15 +444,19 @@ class PnmlValidator:
 
             if source in place_ids and target in place_ids:
                 issues.append(
-                    f"arc '{arc_id}' connects place '{source}' to place "
-                    f"'{target}'; arcs must alternate between places and "
-                    "transitions"
+                    Issue(
+                        f"{arc_name} connects two places; arcs must alternate "
+                        "between places and transitions",
+                        _HINT_ALTERNATION,
+                    )
                 )
             elif source in transition_ids and target in transition_ids:
                 issues.append(
-                    f"arc '{arc_id}' connects transition '{source}' to "
-                    f"transition '{target}'; arcs must alternate between "
-                    "places and transitions"
+                    Issue(
+                        f"{arc_name} connects two transitions; arcs must "
+                        "alternate between places and transitions",
+                        _HINT_ALTERNATION,
+                    )
                 )
 
             # A second identical arc reads as an arc weight of 2 downstream;
@@ -350,9 +464,8 @@ class PnmlValidator:
             # issue for the LLM to resolve.
             if (source, target) in seen_connections:
                 issues.append(
-                    f"duplicate arc from '{source}' to '{target}' (arc "
-                    f"'{arc_id}'); only one arc per direction is allowed "
-                    "between two nodes"
+                    f"{arc_name} occurs twice; only one arc per direction is "
+                    "allowed between two nodes"
                 )
             seen_connections.add((source, target))
 
@@ -371,8 +484,12 @@ class PnmlValidator:
         for node in sorted(disconnected):
             kind = "place" if node in place_ids else "transition"
             issues.append(
-                f"{kind} '{node}' has no arcs at all; it is disconnected from "
-                "the flow, so connect it to the process or remove it"
+                Issue(
+                    f"{kind} '{node}' has no arcs at all; it is disconnected "
+                    "from the flow, so connect it to the process or remove it",
+                    _HINT_ALTERNATION,
+                    _HINT_CONDITION_OUTCOME,
+                )
             )
 
         # Start and end places exclude the disconnected ones, so an isolated
@@ -391,38 +508,49 @@ class PnmlValidator:
             )
         if len(sinks) != 1:
             issues.append(
-                "the net must have exactly one end place (a place without "
-                f"outgoing arcs), found {len(sinks)} "
-                f"({', '.join(sinks) or 'none'})"
+                Issue(
+                    "the net must have exactly one end place (a place without "
+                    f"outgoing arcs), found {len(sinks)} "
+                    f"({', '.join(sinks) or 'none'})",
+                    *((_HINT_DEAD_END,) if len(sinks) > 1 else ()),
+                )
             )
 
         # The single marking rule: exactly one place carries <initialMarking>,
         # its value is exactly one token, and it is the structural start
         # place. One start implies one marking, so the whole rule lives here.
-        marked = {
-            place.get("id"): _child_text(place, "initialMarking")
-            for place in _iter_local(net, "place")
-            if _child_text(place, "initialMarking") is not None
-        }
-        if len(marked) != 1:
-            issues.append(
-                "expected exactly one place with an <initialMarking>, found "
-                f"{len(marked)}; exactly the start place must carry "
-                "<initialMarking><text>1</text></initialMarking>"
-            )
-        else:
-            (marked_id, marking_text), = marked.items()
-            if marking_text != "1":
+        #
+        # Gated on a unique start place, because the marking follows from it.
+        # Reported without one, the finding is unactionable: on the XML path it
+        # points at a symptom whose cause is already listed above, and on the
+        # JSON path the model cannot act on it at all -- its schema has no
+        # marking, this service derives it, and it derives none precisely when
+        # the start place is ambiguous.
+        if len(sources) == 1:
+            marked = {
+                place.get("id"): _child_text(place, "initialMarking")
+                for place in _iter_local(net, "place")
+                if _child_text(place, "initialMarking") is not None
+            }
+            if len(marked) != 1:
                 issues.append(
-                    f"initialMarking of start place '{marked_id}' must be "
-                    f"exactly 1, found '{marking_text}'"
+                    "expected exactly one place with an <initialMarking>, found "
+                    f"{len(marked)}; exactly the start place must carry "
+                    "<initialMarking><text>1</text></initialMarking>"
                 )
-            if incoming.get(marked_id):
-                issues.append(
-                    f"place '{marked_id}' carries the initial marking but "
-                    "has incoming arcs; the initial marking must sit on the "
-                    "start place"
-                )
+            else:
+                (marked_id, marking_text), = marked.items()
+                if marking_text != "1":
+                    issues.append(
+                        f"initialMarking of start place '{marked_id}' must be "
+                        f"exactly 1, found '{marking_text}'"
+                    )
+                if incoming.get(marked_id):
+                    issues.append(
+                        f"place '{marked_id}' carries the initial marking but "
+                        "has incoming arcs; the initial marking must sit on the "
+                        "start place"
+                    )
 
         # Every transition takes part in the flow (mirrors
         # validate_pnml_connectivity in t2p-2.0). Fully isolated transitions
@@ -437,9 +565,12 @@ class PnmlValidator:
             ):
                 if not degree.get(tid):
                     issues.append(
-                        f"transition '{tid}' has no {direction} arc; every "
-                        "transition needs at least one incoming and one "
-                        "outgoing arc"
+                        Issue(
+                            f"transition '{tid}' has no {direction} arc; every "
+                            "transition needs at least one incoming and one "
+                            "outgoing arc",
+                            _HINT_ALTERNATION,
+                        )
                     )
 
         # A transition without a <name> is a silent transition, a standard
@@ -470,8 +601,179 @@ class PnmlValidator:
             co_reachable = _closure(sinks[0], reverse)
             for node in sorted(node_ids - (reachable & co_reachable) - disconnected):
                 issues.append(
-                    f"node '{node}' lies on no path from the start place to "
-                    "the end place; every node must lie on such a path"
+                    Issue(
+                        f"node '{node}' lies on no path from the start place to "
+                        "the end place; every node must lie on such a path",
+                        _HINT_ALTERNATION,
+                        _HINT_CONDITION_OUTCOME,
+                    )
                 )
 
+        return issues
+
+    # --- Behavioural soundness (bounded token game) --------------------------
+
+    #: The token cap makes the reachable state space finite, so the analysis
+    #: always terminates on its own; the only bound that matters in the request
+    #: path is wall-clock time. A net whose exploration runs past the budget
+    #: (heavy concurrency) is left unjudged rather than allowed to stall the
+    #: request. The 1-safe cap additionally signals accumulation.
+    _SOUNDNESS_TIME_LIMIT_S = 2.0
+    _SOUNDNESS_TOKEN_CAP = 2
+
+    @classmethod
+    def _check_soundness(cls, net):
+        """Whether the net can actually run: reach the end, one token, no stall.
+
+        A structurally valid workflow net can still be unrunnable. The recurring
+        case: a transition that joins a loop back or an alternative at itself
+        waits for a token on every incoming arc at once; that token never arrives
+        together with the others, so the transition never fires and the flow
+        stalls before the end. Nothing structural sees this -- the graph is a
+        proper workflow net -- but the token game does.
+
+        Plays the game from one token on the start place under hard bounds, then
+        reports only what it can prove: transitions that can never fire, places
+        that accumulate more than one token, and runs that can no longer reach
+        the end. Beyond a short time budget it stays silent rather than guess. This
+        is the one check that looks past structure at behaviour; its findings, like
+        the others, name the net and travel with a hint into the correction pass.
+        """
+        places = {p.get("id") for p in _iter_local(net, "place")}
+        transitions = {t.get("id") for t in _iter_local(net, "transition")}
+        incoming, outgoing = {}, {}
+        for arc in _iter_local(net, "arc"):
+            outgoing.setdefault(arc.get("source"), []).append(arc.get("target"))
+            incoming.setdefault(arc.get("target"), []).append(arc.get("source"))
+
+        starts = [p for p in places if p not in incoming]
+        ends = [p for p in places if p not in outgoing]
+        if len(starts) != 1 or len(ends) != 1:
+            return []  # the structure checks own this; the game needs one of each
+        start, end = starts[0], ends[0]
+        tinp = {t: incoming.get(t, []) for t in transitions}
+        tout = {t: outgoing.get(t, []) for t in transitions}
+
+        def key(marking):
+            return tuple(sorted((p, c) for p, c in marking.items() if c > 0))
+
+        final = ((end, 1),)
+        seen = {key({start: 1})}
+        adjacency = {}
+        stack = [{start: 1}]
+        fired_ever = set()
+        marked_places = {start}
+        accumulating = set()
+        improper = False
+        truncated = False
+        deadline = time.monotonic() + cls._SOUNDNESS_TIME_LIMIT_S
+        while stack:
+            if time.monotonic() > deadline:
+                truncated = True
+                break
+            marking = stack.pop()
+            successors = adjacency.setdefault(key(marking), [])
+            for t in transitions:
+                ins = tinp[t]
+                if not ins or any(marking.get(p, 0) < 1 for p in ins):
+                    continue
+                fired_ever.add(t)
+                nxt = dict(marking)
+                for p in ins:
+                    nxt[p] -= 1
+                for p in tout[t]:
+                    nxt[p] = nxt.get(p, 0) + 1
+                over = [p for p, c in nxt.items() if c >= cls._SOUNDNESS_TOKEN_CAP]
+                for p in over:
+                    accumulating.add(p)
+                    nxt[p] = cls._SOUNDNESS_TOKEN_CAP
+                if nxt.get(end, 0) >= 1 and any(c > 0 for p, c in nxt.items() if p != end):
+                    improper = True
+                marked_places.update(p for p, c in nxt.items() if c > 0)
+                child = key(nxt)
+                successors.append(child)
+                if child not in seen:
+                    seen.add(child)
+                    stack.append(nxt)
+
+        if truncated:
+            return []  # too large to judge; silence beats a false alarm
+
+        # Which markings can still reach the clean final marking (option to complete)?
+        can_complete = set()
+        if final in seen:
+            reverse = {}
+            for parent, children in adjacency.items():
+                for child in children:
+                    reverse.setdefault(child, set()).add(parent)
+            frontier = [final]
+            can_complete.add(final)
+            while frontier:
+                for parent in reverse.get(frontier.pop(), ()):
+                    if parent not in can_complete:
+                        can_complete.add(parent)
+                        frontier.append(parent)
+
+        issues = []
+        dead = sorted(t for t in transitions if tinp[t] and t not in fired_ever)
+        # The stall points -- dead transitions a token actually reaches on some but
+        # never all inputs -- are the offending merges; the rest are their downstream
+        # victims. Report the stalls, naming the input that never arrives.
+        stalls = [
+            (t, [p for p in tinp[t] if p not in marked_places])
+            for t in dead
+            if any(p in marked_places for p in tinp[t])
+        ]
+        for t, missing in stalls[:3]:
+            never = ", ".join(f"'{p}'" for p in missing) or "one of its inputs"
+            issues.append(
+                Issue(
+                    f"transition '{t}' can never fire: a token reaches it on some "
+                    f"incoming arcs but never on {never} at the same time, so the "
+                    "flow stalls here",
+                    _HINT_SYNC_MERGE,
+                )
+            )
+        if not stalls:
+            for t in dead[:2]:
+                issues.append(
+                    Issue(
+                        f"transition '{t}' can never fire; no run ever enables it",
+                        _HINT_SYNC_MERGE,
+                    )
+                )
+        for p in sorted(accumulating)[:4]:
+            issues.append(
+                Issue(
+                    f"place '{p}' can hold more than one token at once: several "
+                    "branches deposit into it instead of synchronizing at a "
+                    "transition",
+                    _HINT_ACCUMULATE,
+                )
+            )
+        if not issues and improper:
+            issues.append(
+                Issue(
+                    "a run can mark the end place while other places still hold "
+                    "tokens; a completed run leaves exactly one token, on the end "
+                    "place",
+                    _HINT_ACCUMULATE,
+                )
+            )
+        if not issues and final not in seen:
+            issues.append(
+                Issue(
+                    "no run of the net reaches the end place; the flow cannot "
+                    "complete",
+                    _HINT_SYNC_MERGE,
+                )
+            )
+        elif not issues and (seen - can_complete):
+            issues.append(
+                Issue(
+                    "the net can reach a state from which the end place can no "
+                    "longer be marked; a run can get stuck before completing",
+                    _HINT_SYNC_MERGE,
+                )
+            )
         return issues

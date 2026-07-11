@@ -5,8 +5,10 @@ from unittest.mock import patch
 
 from app import create_app
 from app.services.llm_service import (
+    _as_base_url,
     EmptyResponseError,
     LLMService,
+    _pnml_from_xml_reply,
     PnmlAttempt,
     PnmlGeneration,
     TokenUsage,
@@ -14,10 +16,11 @@ from app.services.llm_service import (
     _openai_token_usage,
     _sum_token_usage,
 )
-from app.services.pnml_validator import NetCounts, PnmlValidator
+from app.services.pnml_validator import Issue, NetCounts, PnmlValidator, hints_for
 from config import BaseConfig, TestingConfig
 
 PT_NET_TYPE = "http://www.informatik.hu-berlin.de/top/pntd/ptNetb"
+XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>\n'
 
 PNML_DOC = (
     f'<pnml><net type="{PT_NET_TYPE}" id="noID">'
@@ -85,22 +88,26 @@ MARKED_START = (
 
 
 class TestPnmlExtraction(unittest.TestCase):
-    def test_plain_pnml_is_returned_with_declaration(self):
-        result = LLMService._extract_pnml_document(PNML_DOC)
-        self.assertTrue(result.startswith("<?xml"))
-        self.assertIn(PNML_DOC, result)
+    """The model writes the document; nothing is extracted from around it."""
 
-    def test_markdown_fences_and_prose_are_stripped(self):
-        raw = f"Sure! Here is your net:\n```xml\n{PNML_DOC}\n```\nEnjoy."
-        result = LLMService._extract_pnml_document(raw)
-        self.assertIn(PNML_DOC, result)
-        self.assertNotIn("```", result)
-        self.assertNotIn("Sure!", result)
+    def test_the_reply_is_the_document(self):
+        self.assertEqual(_pnml_from_xml_reply(PNML_DOC), PNML_DOC)
 
-    def test_reply_without_pnml_returns_none(self):
-        self.assertIsNone(LLMService._extract_pnml_document("no net here"))
-        self.assertIsNone(LLMService._extract_pnml_document(""))
-        self.assertIsNone(LLMService._extract_pnml_document(None))
+    def test_surrounding_whitespace_is_the_only_thing_removed(self):
+        self.assertEqual(_pnml_from_xml_reply(f"\n {PNML_DOC}\n"), PNML_DOC)
+
+    def test_prose_and_fences_are_not_carved_out_but_left_to_the_validator(self):
+        # Wrapping the document is a violated instruction, not a wrapper to be
+        # cut away: the reply reaches the validator, whose first gate rejects it
+        # and whose finding drives a correction pass.
+        raw = f"Sure! Here is your net:\n```xml\n{PNML_DOC}\n```"
+        self.assertEqual(_pnml_from_xml_reply(raw), raw)
+        self.assertIn("not valid XML", _issues(raw)[0])
+
+    def test_an_empty_reply_is_none(self):
+        self.assertIsNone(_pnml_from_xml_reply(""))
+        self.assertIsNone(_pnml_from_xml_reply("   \n"))
+        self.assertIsNone(_pnml_from_xml_reply(None))
 
 
 class TestRepairPrompt(unittest.TestCase):
@@ -111,6 +118,50 @@ class TestRepairPrompt(unittest.TestCase):
         self.assertIn("ship the order", prompt)
         self.assertIn(PNML_DOC, prompt)
         self.assertIn("arc a1 connects two places", prompt)
+
+    def test_the_modelling_rules_are_not_restated(self):
+        # They live in the system prompt, which is sent on every call, this one
+        # included. A second copy here would be one that can drift.
+        prompt = LLMService()._build_pnml_repair_prompt(
+            "ship the order", PNML_DOC, ["something is wrong"]
+        )
+        self.assertNotIn("alternate", prompt)
+        self.assertNotIn("approved", prompt)
+
+    def test_only_the_hints_of_the_findings_at_hand_are_carried(self):
+        # A bipartiteness finding brings the alternation constraint, so a fix
+        # cannot introduce the very defect it repairs; it says nothing about
+        # condition outcomes, which no reported node names.
+        bipartite = _issues(
+            _net(
+                MARKED_START + '<place id="p2"/><transition id="t1"/>'
+                '<arc id="a1" source="p1" target="p2"/>'
+                '<arc id="a2" source="p2" target="t1"/>'
+                '<arc id="a3" source="t1" target="p2"/>'
+            )
+        )
+        prompt = LLMService()._build_pnml_repair_prompt("ship it", PNML_DOC, bipartite)
+        self.assertIn("never join two places", prompt)
+        self.assertNotIn("'authenticated'", prompt)
+
+    def test_a_disconnected_node_also_carries_the_condition_outcome_hint(self):
+        disconnected = _issues(_net(VALID_INNER + '<place id="p_approved"/>'))
+        prompt = LLMService()._build_pnml_repair_prompt(
+            "ship it", PNML_DOC, disconnected
+        )
+        self.assertIn("never join two places", prompt)
+        self.assertIn("'authenticated'", prompt)
+
+    def test_a_hint_two_findings_share_is_carried_once(self):
+        issues = [
+            Issue("first finding", "the shared constraint"),
+            Issue("second finding", "the shared constraint"),
+        ]
+        prompt = LLMService()._build_pnml_repair_prompt("ship it", PNML_DOC, issues)
+        self.assertEqual(prompt.count("the shared constraint"), 1)
+
+    def test_gate_findings_carry_no_hints(self):
+        self.assertEqual(hints_for(_issues("not xml at all")), [])
 
 
 class TestPnmlGates(unittest.TestCase):
@@ -256,8 +307,19 @@ class TestPnmlStructure(unittest.TestCase):
     def test_self_loop(self):
         self.assert_issue(
             _net(MARKED_START + '<arc id="a1" source="p1" target="p1"/>'),
-            "connects 'p1' to itself",
+            "the arc from 'p1' to 'p1' connects a node to itself",
         )
+
+    def test_an_arc_is_named_by_its_endpoints_never_by_its_id(self):
+        # The JSON path derives arc ids while serializing, so a finding naming
+        # 'a1' would send that model looking for something it never wrote.
+        doc = _net(
+            MARKED_START + '<place id="p2"/><transition id="t1"/>'
+            '<arc id="a1" source="p1" target="p2"/>'
+            '<arc id="a2" source="p2" target="t1"/>'
+            '<arc id="a3" source="t1" target="p2"/>'
+        )
+        self.assertNotIn("a1", " ".join(_issues(doc)))
 
     def test_bipartiteness(self):
         doc = _net(
@@ -266,7 +328,7 @@ class TestPnmlStructure(unittest.TestCase):
             '<arc id="a2" source="p2" target="t1"/>'
             '<arc id="a3" source="t1" target="p2"/>'
         )
-        self.assert_issue(doc, "place 'p1' to place 'p2'")
+        self.assert_issue(doc, "the arc from 'p1' to 'p2' connects two places")
 
     def test_exactly_one_source_and_sink(self):
         two_sources = _net(
@@ -286,6 +348,21 @@ class TestPnmlStructure(unittest.TestCase):
         self.assert_issue(
             unmarked, "exactly one place with an <initialMarking>, found 0"
         )
+
+    def test_the_marking_rule_is_gated_on_a_unique_start_place(self):
+        # Without one start place the marking cannot be judged: the finding
+        # would name a symptom whose cause is already reported, and the JSON
+        # path -- whose schema has no marking, and which derives none precisely
+        # when the start place is ambiguous -- could not act on it at all.
+        two_sources = _net(
+            MARKED_START + '<place id="p2"/><transition id="t1"/><place id="p3"/>'
+            '<arc id="a1" source="p1" target="t1"/>'
+            '<arc id="a2" source="p2" target="t1"/>'
+            '<arc id="a3" source="t1" target="p3"/>'
+        )
+        issues = _issues(two_sources)
+        self.assertTrue(any("exactly one start place" in i for i in issues))
+        self.assertFalse(any("initialMarking" in i for i in issues), issues)
 
     def test_marking_must_be_exactly_one_token(self):
         for bad_value in ("3", "-1", "one"):
@@ -338,7 +415,7 @@ class TestPnmlStructure(unittest.TestCase):
             '<arc id="a2" source="t1" target="p2"/>'
             '<arc id="a3" source="t1" target="p2"/>',
         )
-        self.assert_issue(doc, "duplicate arc from 't1' to 'p2'")
+        self.assert_issue(doc, "the arc from 't1' to 'p2' occurs twice")
 
     def test_stranded_nodes_are_reported(self):
         doc = _net(
@@ -364,7 +441,11 @@ class TestPnmlStructure(unittest.TestCase):
 
 
 def _with_duplicate_arc(arc_id):
-    """VALID_NET plus one duplicate t1->p2 arc; exactly one level-2 issue."""
+    """VALID_NET plus one duplicate t1->p2 arc; exactly one level-2 issue.
+
+    The finding names the arc by its endpoints, so the id varies the document
+    without varying the issue: two such attempts read as no progress.
+    """
     return VALID_NET.replace(
         '<arc id="a2" source="t1" target="p2"/>',
         '<arc id="a2" source="t1" target="p2"/>'
@@ -372,7 +453,20 @@ def _with_duplicate_arc(arc_id):
     )
 
 
-_CALL = TokenUsage(input=100, output=50, total=150)
+def _with_stranded_transition(transition_id):
+    """VALID_NET plus one transition with no arcs; exactly one issue, naming it.
+
+    The counterpart of ``_with_duplicate_arc``: here the id reaches the finding,
+    so consecutive attempts differ and the loop keeps going.
+    """
+    return VALID_NET.replace(
+        '<place id="p2"><name><text>end</text></name></place>',
+        '<place id="p2"><name><text>end</text></name></place>'
+        f'<transition id="{transition_id}"><name><text>archive order</text></name></transition>',
+    )
+
+
+_CALL = TokenUsage(input=100, cached_input=0, output=50, reasoning=0, total=150)
 
 
 def _billed(replies):
@@ -425,7 +519,7 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         self.assertEqual(mocked.call_count, 2)
         # The correction prompt carries the previous document and the issue.
         correction_prompt = mocked.call_args_list[1].args[3]
-        self.assertIn("duplicate arc", correction_prompt)
+        self.assertIn("occurs twice", correction_prompt)
         self.assertIn("<pnml>", correction_prompt)
 
     def test_identical_issues_stop_the_loop(self):
@@ -436,26 +530,61 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         self.assertEqual(len(generation.best.issues), 1)
 
     def test_budget_is_one_generation_plus_three_corrections(self):
-        replies = [
-            _with_duplicate_arc("a3"),
-            _with_duplicate_arc("a4"),
-            _with_duplicate_arc("a5"),
-            _with_duplicate_arc("a6"),
-            _with_duplicate_arc("a7"),
-        ]
+        # Each attempt strands a different transition, so every pass reports a
+        # new issue and the loop runs to its budget instead of stopping early.
+        replies = [_with_stranded_transition(f"t{i}") for i in range(3, 8)]
         generation, mocked = self._generate(replies)
         self.assertEqual(mocked.call_count, 4)
         self.assertEqual(len(generation.attempts), 4)
         self.assertEqual(len(generation.best.issues), 1)
 
-    def test_correction_without_pnml_keeps_previous_attempt(self):
+    def test_the_same_defect_under_a_new_arc_id_reads_as_no_progress(self):
+        # A finding named by endpoints is stable across a re-issued document,
+        # so a model that renames the offending arc rather than removing it no
+        # longer buys itself another correction pass.
+        generation, mocked = self._generate(
+            [_with_duplicate_arc("a3"), _with_duplicate_arc("a4")]
+        )
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(len(generation.attempts), 2)
+        self.assertEqual(len(generation.best.issues), 1)
+
+    def test_correction_without_a_reply_keeps_previous_attempt(self):
         broken = _with_duplicate_arc("a3")
-        generation, mocked = self._generate([broken, "no xml in here"])
+        generation, mocked = self._generate([broken, ""])
         self.assertEqual(mocked.call_count, 2)
         self.assertIn(broken, generation.best.pnml)
         self.assertEqual(len(generation.best.issues), 1)
         # The unusable reply is not an attempt: nothing was validated.
         self.assertEqual(len(generation.attempts), 1)
+
+    def test_a_correction_that_answers_with_prose_is_validated_not_discarded(self):
+        # Prose is no longer carved away, so it becomes an attempt whose gate
+        # finding says what is wrong -- and a further pass may act on it. It
+        # never wins on issue count, so the usable attempt is still delivered.
+        broken = _with_duplicate_arc("a3")
+        prose = "Sure! Here is your net."
+        generation, _ = self._generate([broken, prose, prose])
+        self.assertIn("not valid XML", generation.attempts[1].issues[0])
+        self.assertEqual(generation.best_index, 0)
+        self.assertIn(broken, generation.best.pnml)
+
+    def test_an_empty_correction_from_the_provider_keeps_previous_attempt(self):
+        # The real provider raises rather than returning "": a correction that
+        # dies must not take the usable attempt before it down with it.
+        broken = _with_duplicate_arc("a3")
+        replies = [broken, EmptyResponseError("provider returned nothing")]
+
+        def once(*_args, **_kwargs):
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        generation, mocked = self._generate(once)
+        self.assertEqual(mocked.call_count, 2)
+        self.assertEqual(len(generation.attempts), 1)
+        self.assertIn(broken, generation.best.pnml)
 
     def test_best_attempt_with_fewest_issues_is_delivered(self):
         two_issues = VALID_NET.replace(
@@ -480,7 +609,7 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         generation, _ = self._generate([_with_duplicate_arc("a3"), VALID_NET])
         first = generation.attempts[0]
         self.assertEqual(len(first.issues), 1)
-        self.assertIn("duplicate arc", first.issues[0])
+        self.assertIn("occurs twice", first.issues[0])
         self.assertEqual(generation.best_index, 1)
         self.assertEqual(generation.best.issues, [])
 
@@ -514,9 +643,9 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         self.assertEqual(generation.tokens.total, 300)
 
     def test_a_discarded_reply_is_billed_but_is_no_attempt(self):
-        # The second reply carries no net, so it never becomes an attempt --
-        # but the tokens it burned still belong in the total.
-        generation, _ = self._generate(_billed([_with_duplicate_arc("a3"), "no xml"]))
+        # The second reply is empty, so it never becomes an attempt -- but the
+        # tokens it burned still belong in the total.
+        generation, _ = self._generate(_billed([_with_duplicate_arc("a3"), ""]))
         self.assertEqual(len(generation.attempts), 1)
         self.assertEqual(generation.tokens.total, 300)
 
@@ -525,10 +654,31 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         self.assertIsNone(generation.tokens)
         self.assertIsNone(generation.usage_for(0))
 
-    @patch("app.services.llm_service.genai")
+    def test_the_summary_line_carries_model_issue_trail_and_tokens(self):
+        # Concurrent demo requests interleave in the log, so a run has to be
+        # readable off this one line.
+        with self.assertLogs("app.services.llm_service", level="INFO") as logs:
+            self._generate(_billed([_with_duplicate_arc("a3"), VALID_NET]))
+        summary = next(l for l in logs.output if "PNML generation done" in l)
+        self.assertIn("model=gpt-4o", summary)
+        self.assertIn("issues=[1, 0]", summary)      # first attempt -> delivered
+        self.assertIn("delivered=attempt 1 of 1", summary)
+        self.assertIn("calls=2", summary)
+        self.assertIn("total=300", summary)
+
+    def test_the_summary_line_reports_a_discarded_reply_as_an_extra_call(self):
+        # calls=2 next to a one-entry trail: the second reply was billed but
+        # never became an attempt.
+        with self.assertLogs("app.services.llm_service", level="INFO") as logs:
+            self._generate(_billed([_with_duplicate_arc("a3"), ""]))
+        summary = next(l for l in logs.output if "PNML generation done" in l)
+        self.assertIn("issues=[1]", summary)
+        self.assertIn("calls=2", summary)
+
+    @patch("app.services.llm_service.new_genai")
     def test_gemini_provider_is_dispatched(self, mock_genai):
         with patch.object(
-            LLMService, "_gemini_generate_once", side_effect=[VALID_NET]
+            LLMService, "_gemini_pnml_generate_once", side_effect=[VALID_NET]
         ) as mocked:
             generation = self.service.generate_pnml(
                 api_key="test-key",
@@ -539,7 +689,36 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
             )
         self.assertEqual(generation.best.issues, [])
         mocked.assert_called_once()
-        mock_genai.configure.assert_called_once_with(api_key="test-key")
+        # A client per call, not a process-wide genai.configure: concurrent
+        # requests carry different API keys.
+        mock_genai.Client.assert_called_once_with(api_key="test-key")
+
+    @patch("app.services.llm_service.new_genai")
+    def test_the_gemini_budget_is_capped_at_what_the_model_can_emit(self, _mock_genai):
+        with patch.object(
+            LLMService, "_gemini_pnml_generate_once", side_effect=[VALID_NET]
+        ) as mocked:
+            self.service.generate_pnml(
+                api_key="test-key",
+                provider="gemini",
+                model="gemini-2.0-flash",
+                user_text="ship the order",
+                system_prompt="prompt under test",
+            )
+        self.assertEqual(mocked.call_args.kwargs["max_output_tokens"], 8192)
+
+    def test_both_providers_are_asked_for_the_same_output_budget(self):
+        # The shared budget; only a model's hard ceiling may lower it.
+        generation, mocked = self._generate([VALID_NET])
+        self.assertEqual(mocked.call_args.kwargs["max_completion_tokens"], 32768)
+
+    def test_a_configured_gemini_host_becomes_a_base_url(self):
+        # The old SDK took a bare host; HttpOptions.base_url needs a scheme.
+        self.assertEqual(
+            _as_base_url("generativelanguage.googleapis.com"),
+            "https://generativelanguage.googleapis.com",
+        )
+        self.assertEqual(_as_base_url("http://proxy.local/"), "http://proxy.local")
 
 
 class TestTokenUsageExtraction(unittest.TestCase):
@@ -551,7 +730,23 @@ class TestTokenUsageExtraction(unittest.TestCase):
                 prompt_tokens=1200, completion_tokens=800, total_tokens=2000
             )
         )
-        self.assertEqual(_openai_token_usage(completion), TokenUsage(1200, 800, 2000))
+        self.assertEqual(
+            _openai_token_usage(completion), TokenUsage(1200, 0, 800, 0, 2000)
+        )
+
+    def test_openai_sub_counts_are_read_from_the_details(self):
+        completion = SimpleNamespace(
+            usage=SimpleNamespace(
+                prompt_tokens=1200,
+                completion_tokens=800,
+                total_tokens=2000,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=1024),
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=640),
+            )
+        )
+        usage = _openai_token_usage(completion)
+        self.assertEqual(usage.cached_input, 1024)  # part of the 1200 input
+        self.assertEqual(usage.reasoning, 640)      # part of the 800 output
 
     def test_openai_without_usage_is_none(self):
         self.assertIsNone(_openai_token_usage(SimpleNamespace(usage=None)))
@@ -564,14 +759,32 @@ class TestTokenUsageExtraction(unittest.TestCase):
                 total_token_count=420,
             )
         )
-        self.assertEqual(_gemini_token_usage(response), TokenUsage(300, 120, 420))
+        self.assertEqual(_gemini_token_usage(response), TokenUsage(300, 0, 120, 0, 420))
+
+    def test_gemini_thinking_is_output_even_when_candidates_exclude_it(self):
+        # Vertex AI leaves thoughts out of candidates_token_count, the Gemini
+        # API folds them in. Deriving output from the total covers both: here
+        # candidates (120) + thoughts (80) = the 200 that are not input.
+        response = SimpleNamespace(
+            usage_metadata=SimpleNamespace(
+                prompt_token_count=300,
+                candidates_token_count=120,
+                thoughts_token_count=80,
+                cached_content_token_count=256,
+                total_token_count=500,
+            )
+        )
+        usage = _gemini_token_usage(response)
+        self.assertEqual(usage.output, 200)
+        self.assertEqual(usage.reasoning, 80)
+        self.assertEqual(usage.cached_input, 256)
 
     def test_gemini_without_usage_metadata_is_none(self):
         self.assertIsNone(_gemini_token_usage(SimpleNamespace()))
 
     def test_sum_adds_field_wise_and_skips_unrecorded_calls(self):
-        usages = [TokenUsage(10, 5, 15), None, TokenUsage(20, 5, 25)]
-        self.assertEqual(_sum_token_usage(usages), TokenUsage(30, 10, 40))
+        usages = [TokenUsage(10, 2, 5, 1, 15), None, TokenUsage(20, 3, 5, 4, 25)]
+        self.assertEqual(_sum_token_usage(usages), TokenUsage(30, 5, 10, 5, 40))
         self.assertIsNone(_sum_token_usage([None]))
 
 
@@ -599,7 +812,11 @@ class TestGeneratePnmlIntegration(unittest.TestCase):
             )
 
     def test_invalid_first_reply_is_corrected_end_to_end(self):
-        response = self._post([_with_duplicate_arc("a3"), VALID_NET])
+        # The declaration comes from the model, which the prompt asks for it:
+        # the service no longer prepends one, because it no longer rebuilds the
+        # document it was handed.
+        declared = XML_DECLARATION + VALID_NET
+        response = self._post([_with_duplicate_arc("a3"), declared])
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.mimetype, "application/xml")
         self.assertTrue(response.data.startswith(b"<?xml"))
@@ -610,7 +827,7 @@ class TestGeneratePnmlIntegration(unittest.TestCase):
         response = self._post([broken, broken, broken, broken])
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'id="a3"', response.data)
-        self.assertIn("duplicate arc", response.headers["X-Validation-Issues"])
+        self.assertIn("occurs twice", response.headers["X-Validation-Issues"])
 
 
 class TestDemoPage(unittest.TestCase):
@@ -682,14 +899,23 @@ class TestGeneratePnmlRoute(unittest.TestCase):
     @patch("app.api.routes.model_registry.is_valid", return_value=True)
     @patch(
         "app.api.pnml_routes._llm_service.generate_pnml",
-        return_value=_generation(PNML_DOC, usages=[TokenUsage(1200, 800, 2000)]),
+        return_value=_generation(
+            PNML_DOC, usages=[TokenUsage(1200, 1024, 800, 640, 2000)]
+        ),
     )
     def test_debug_view_reports_tokens(self, _gen, _valid, _refresh):
         payload = self._post(debug=True).get_json()
         self.assertEqual(
-            payload["tokens"], {"input": 1200, "output": 800, "total": 2000}
+            payload["tokens"],
+            {
+                "input": 1200,
+                "cached_input": 1024,
+                "output": 800,
+                "reasoning": 640,
+                "total": 2000,
+            },
         )
-        self.assertEqual(payload["attempts"][0]["tokens"]["total"], 2000)
+        self.assertEqual(payload["attempts"][0]["tokens"]["output"], 800)
 
     def test_missing_auth_returns_401(self):
         response = self.client.post(

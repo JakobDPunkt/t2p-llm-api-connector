@@ -308,10 +308,12 @@ const LIVE_BASE = "https://woped.dhbw-karlsruhe.de/t2p-2.0";
 // discarded by a premature abort.
 const TIMEOUT_MS = 240000;
 
-/** The model each panel selects on its own: the two cheap OpenAI tiers, so the
- *  page opens on the comparison the demo is for. Only a preference: the user's
- *  own pick always survives a provider or key change. */
-const DEFAULT_FAMILY = { a: "nano", b: "mini" };
+/** The page opens on the comparison the demo is for: the same model on both
+ *  sides, so what differs is the backend path, not the model. Falls back to the
+ *  newest model of the family when this exact id is not on offer. Only a
+ *  preference: the user's own pick always survives a provider or key change. */
+const DEFAULT_MODEL = "gpt-5.6-terra";
+const DEFAULT_FAMILY = "terra";
 
 /** "1 issue" / "3 issues" without the (s) shorthand. Irregular plurals pass
  *  their own form: plural(2, "retry", "retries"). */
@@ -324,6 +326,21 @@ function formatTokens(n) {
   if (n < 1000) return String(n);
   const thousands = n / 1000;
   return (thousands < 10 ? thousands.toFixed(1) : Math.round(thousands)) + "k";
+}
+
+/** Input and output are billed at different rates, so they are never added up
+ *  into a single number. Output is the expensive side. */
+function tokenBadge(t) {
+  return `${formatTokens(t.input)} in · ${formatTokens(t.output)} out`;
+}
+
+/** The exact counts, naming the cheaper share of the input (cached) and the
+ *  hidden share of the output (reasoning), both billed differently than the
+ *  rest of what they belong to. */
+function tokenDetail(t) {
+  const cached = t.cached_input ? ` (${t.cached_input} cached)` : "";
+  const thinking = t.reasoning ? ` (${t.reasoning} reasoning)` : "";
+  return `${t.input} in${cached} + ${t.output} out${thinking}`;
 }
 
 /** Distil the direct backend's attempt history into the numbers the result
@@ -349,24 +366,34 @@ function generationReport(history) {
 }
 
 const Api = {
+  /** The three backends the page can compare. `path` marks a mode served by
+   *  this connector: same-origin, attempt history, PNML in the body. The
+   *  pipeline is the live deployment and answers a different shape. */
   modesInfo: {
-    direct: { label: "Direct PNML" },
+    direct: { label: "Direct PNML (XML)", path: "generate_pnml_direct" },
+    "direct-json": { label: "Direct PNML (JSON)", path: "generate_pnml_direct_json" },
     pipeline: { label: "Pipeline" },
+  },
+
+  /** True for the two direct modes, which share one request and reply shape. */
+  isDirect(mode) {
+    return Boolean(this.modesInfo[mode].path);
   },
 
   async generate(mode, { text, provider, model, apiKey }) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
     const started = performance.now();
+    const direct = this.isDirect(mode);
     try {
       // Relative same-origin path so the page also works behind a
       // path-prefix reverse proxy (resolved against /demo).
       // debug=1 asks the direct backend for the full attempt history (JSON)
       // instead of bare PNML, so the page can show the correction timeline.
-      const url = mode === "direct"
-        ? "generate_pnml_direct?debug=1"
+      const url = direct
+        ? this.modesInfo[mode].path + "?debug=1"
         : LIVE_BASE + "/v2/generate/pnml";
-      const body = mode === "direct"
+      const body = direct
         ? { user_text: text, provider, model }
         : { text, provider, model };
       const response = await fetch(url, {
@@ -382,7 +409,7 @@ const Api = {
       if (!response.ok) {
         throw Object.assign(new Error(await this.errorMessage(response, mode)), { ms });
       }
-      if (mode === "direct") {
+      if (direct) {
         // Debug contract:
         // {pnml, delivered_index, tokens, attempts:[{issues, counts, tokens}]}.
         const payload = await response.json();
@@ -409,7 +436,7 @@ const Api = {
       }
       if (err instanceof TypeError) {
         throw Object.assign(
-          new Error(mode === "direct"
+          new Error(direct
             ? "Could not reach this connector. Is it still running?"
             : "Could not reach the live WoPeD server."),
           { ms: performance.now() - started }
@@ -434,7 +461,7 @@ const Api = {
         }
       }
     } catch { /* non-JSON error page (e.g. proxy 502): keep the status text */ }
-    if (response.status === 502 && mode === "pipeline") {
+    if (response.status === 502 && !this.isDirect(mode)) {
       message += " (The live server may time out on long generations.)";
     }
     return message;
@@ -445,7 +472,7 @@ const Api = {
    * /health/ready would test provider connectivity instead and takes
    * seconds. */
   async reachable(mode) {
-    const url = mode === "direct" ? "_/_/echo" : LIVE_BASE + "/v2/health";
+    const url = this.isDirect(mode) ? "_/_/echo" : LIVE_BASE + "/v2/health";
     const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
     return response.ok;
   },
@@ -481,9 +508,9 @@ const App = {
   modelGeneration: { a: 0, b: 0 },
   probeGeneration: { a: 0, b: 0 },
   backendUp: { a: null, b: null },
-  // Set once the user picks a model by hand. Until then the side re-applies its
-  // DEFAULT_FAMILY on every refill, so the nano/mini pair still lands when the
-  // key arrives and turns a one-model fallback list into the real one.
+  // Set once the user picks a model by hand. Until then the side re-applies the
+  // default on every refill, so it still lands when the key arrives and turns a
+  // one-model fallback list into the real one.
   modelChosen: { a: false, b: false },
 
   el(id) { return document.getElementById(id); },
@@ -609,13 +636,19 @@ const App = {
       option.value = option.textContent = m;
       modelSelect.appendChild(option);
     }
-    const preferred = this.modelChosen[side]
-      ? undefined
-      : this.newestOfFamily(models, DEFAULT_FAMILY[side]);
+    const preferred = this.modelChosen[side] ? undefined : this.defaultModel(models);
     if (preferred) modelSelect.value = preferred;
     else if (models.includes(previous)) modelSelect.value = previous;
     this.updateModelsNote(side);
     this.refreshRunButton();
+  },
+
+  /** The model a side starts on: the pinned default when the provider offers
+   *  it, otherwise the newest of its family. Undefined for a provider that has
+   *  neither, which leaves the first option standing. */
+  defaultModel(models) {
+    if (models.includes(DEFAULT_MODEL)) return DEFAULT_MODEL;
+    return this.newestOfFamily(models, DEFAULT_FAMILY);
   },
 
   /** The newest model of a family, ranked by the version in its id, so that a
@@ -799,8 +832,7 @@ const App = {
     // The whole generation, correction passes included (direct backend only;
     // the live pipeline reports no tokens).
     if (report && report.tokens) {
-      const { input, output, total } = report.tokens;
-      add("stat", `${formatTokens(total)} tokens`, `${input} in + ${output} out`);
+      add("stat", tokenBadge(report.tokens), tokenDetail(report.tokens));
     }
 
     // Generation quality (direct backend only), then how much correcting it
@@ -853,7 +885,7 @@ const App = {
       const label = i === 0 ? "First attempt" : `Retry ${i}`;
       const tag = i === deliveredIndex ? " (delivered)" : "";
       const spent = passTokens[i];
-      const cost = spent ? ` · ${formatTokens(spent.total)} tokens` : "";
+      const cost = spent ? ` · ${tokenBadge(spent)}` : "";
       const stage = document.createElement("details");
       stage.className = "pass";
       stage.appendChild(this._summaryEl(
