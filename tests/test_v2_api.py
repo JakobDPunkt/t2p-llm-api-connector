@@ -25,12 +25,15 @@ class TestV2Api(unittest.TestCase):
         mock_completion.choices = [mock_choice]
         mock_openai.return_value.chat.completions.create.return_value = mock_completion
 
-    def _mock_gemini(self, mock_genai, content="RAW GEMINI JSON"):
+    def _mock_gemini(self, mock_build_client, content="RAW GEMINI JSON"):
+        """Stub the Gemini client the service builds for the caller's key."""
         mock_response = MagicMock()
         mock_response.text = content
-        mock_model = MagicMock()
-        mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_response.candidates = []
+        client = MagicMock()
+        client.models.generate_content.return_value = mock_response
+        mock_build_client.return_value = client
+        return client
 
     # --- /models ----------------------------------------------------------
     @patch("app.api.routes.model_registry.get_cached_models")
@@ -204,9 +207,9 @@ class TestV2Api(unittest.TestCase):
         self.assertEqual(response.get_json(), {"raw_response": "RAW BPMN JSON"})
         self.assertEqual(mock_generate.call_args.kwargs["model"], "gpt-5-mini")
 
-    @patch("app.services.llm_service.genai")
-    def test_generate_gemini_success(self, mock_genai):
-        self._mock_gemini(mock_genai)
+    @patch("app.services.llm_service.build_gemini_client")
+    def test_generate_gemini_success(self, mock_build_client):
+        self._mock_gemini(mock_build_client)
         response = self.client.post(
             "/generate",
             headers={"Authorization": "Bearer secret-token"},
@@ -289,14 +292,13 @@ class TestV2Api(unittest.TestCase):
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.get_json()["error"]["code"], "rate_limited")
 
-    @patch("app.services.llm_service.genai")
-    def test_generate_gemini_provider_error_is_500_upstream(self, mock_genai):
+    @patch("app.services.llm_service.build_gemini_client")
+    def test_generate_gemini_provider_error_is_500_upstream(self, mock_build_client):
         # The Gemini provider must map a provider-side failure to the same
         # upstream_error 500 as OpenAI does (the OpenAI path is covered above;
         # this closes the second-provider asymmetry).
-        mock_genai.GenerativeModel.return_value.generate_content.side_effect = (
-            RuntimeError("boom")
-        )
+        client = self._mock_gemini(mock_build_client)
+        client.models.generate_content.side_effect = RuntimeError("boom")
         response = self.client.post(
             "/generate",
             headers={"Authorization": "Bearer secret-token"},
@@ -309,13 +311,11 @@ class TestV2Api(unittest.TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.get_json()["error"]["code"], "upstream_error")
 
-    @patch("app.services.llm_service.genai")
-    def test_generate_gemini_empty_response_is_400_invalid_request(self, mock_genai):
-        mock_response = MagicMock()
-        mock_response.text = ""
-        mock_genai.GenerativeModel.return_value.generate_content.return_value = (
-            mock_response
-        )
+    @patch("app.services.llm_service.build_gemini_client")
+    def test_generate_gemini_empty_response_is_400_invalid_request(
+        self, mock_build_client
+    ):
+        self._mock_gemini(mock_build_client, content="")
 
         response = self.client.post(
             "/generate",
@@ -329,9 +329,10 @@ class TestV2Api(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.get_json()["error"]["code"], "invalid_request")
 
-    @patch("app.services.llm_service.genai")
-    def test_generate_gemini_quota_error_is_429_rate_limited(self, mock_genai):
-        mock_genai.GenerativeModel.return_value.generate_content.side_effect = RuntimeError(
+    @patch("app.services.llm_service.build_gemini_client")
+    def test_generate_gemini_quota_error_is_429_rate_limited(self, mock_build_client):
+        client = self._mock_gemini(mock_build_client)
+        client.models.generate_content.side_effect = RuntimeError(
             "quota_metric: "
             "generativelanguage.googleapis.com/"
             "generate_content_free_tier_requests"

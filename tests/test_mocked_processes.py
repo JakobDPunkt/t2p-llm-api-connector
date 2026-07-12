@@ -128,16 +128,21 @@ class TestMockedProcesses(unittest.TestCase):
 
         mock_openai.assert_called_with(api_key=self.openai_api_key)
 
+    @staticmethod
+    def _gemini_reply(text):
+        """A Gemini reply that ran to completion (no truncation)."""
+        return MagicMock(text=text, candidates=[])
+
     @patch("app.services.llm_service.ModelValidator.validate_model", return_value=[])
-    @patch("app.services.llm_service.genai")
-    def test_gemini_few_shot_with_mocked_api(self, mock_genai, _mock_validate):
-        mock_model = MagicMock()
-        mock_genai.GenerativeModel.return_value = mock_model
+    @patch("app.services.llm_service.build_gemini_client")
+    def test_gemini_few_shot_with_mocked_api(self, mock_build_client, _mock_validate):
+        client = MagicMock()
+        mock_build_client.return_value = client
 
         for process_file in self.process_files:
             step_payloads = self._few_shot_step_payloads()
-            mock_model.generate_content.side_effect = [
-                MagicMock(text=json.dumps(payload)) for payload in step_payloads
+            client.models.generate_content.side_effect = [
+                self._gemini_reply(json.dumps(payload)) for payload in step_payloads
             ]
 
             result = self.service.call_gemini(
@@ -152,13 +157,17 @@ class TestMockedProcesses(unittest.TestCase):
             self.assertIn("tasks", parsed)
             self.assertIn("flows", parsed)
 
-        mock_genai.configure.assert_called_with(api_key=self.gemini_api_key)
+        mock_build_client.assert_called_with(
+            self.gemini_api_key, api_endpoint=None
+        )
 
-    @patch("app.services.llm_service.genai")
-    def test_gemini_zero_shot_with_mocked_api(self, mock_genai):
-        mock_model = MagicMock()
-        mock_model.generate_content.return_value = MagicMock(text='{"result": "ok"}')
-        mock_genai.GenerativeModel.return_value = mock_model
+    @patch("app.services.llm_service.build_gemini_client")
+    def test_gemini_zero_shot_with_mocked_api(self, mock_build_client):
+        client = MagicMock()
+        client.models.generate_content.return_value = self._gemini_reply(
+            '{"result": "ok"}'
+        )
+        mock_build_client.return_value = client
 
         for process_file in self.process_files:
             result = self.service.call_gemini(
@@ -170,7 +179,11 @@ class TestMockedProcesses(unittest.TestCase):
             )
             self.assertTrue(result)
 
-        mock_genai.configure.assert_called_with(api_key=self.gemini_api_key)
+        # A client per call carrying the caller's key, not a process-wide
+        # genai.configure() that concurrent requests race for.
+        mock_build_client.assert_called_with(
+            self.gemini_api_key, api_endpoint=None
+        )
 
 
 if __name__ == "__main__":

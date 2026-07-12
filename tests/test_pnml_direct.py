@@ -4,8 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import create_app
+from app.services.gemini_client import as_base_url
 from app.services.llm_service import (
-    _as_base_url,
     EmptyResponseError,
     LLMService,
     _pnml_from_xml_reply,
@@ -675,10 +675,10 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         self.assertIn("issues=[1]", summary)
         self.assertIn("calls=2", summary)
 
-    @patch("app.services.llm_service.new_genai")
+    @patch("app.services.gemini_client.genai")
     def test_gemini_provider_is_dispatched(self, mock_genai):
         with patch.object(
-            LLMService, "_gemini_pnml_generate_once", side_effect=[VALID_NET]
+            LLMService, "_gemini_generate_once", side_effect=[VALID_NET]
         ) as mocked:
             generation = self.service.generate_pnml(
                 api_key="test-key",
@@ -693,10 +693,10 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         # requests carry different API keys.
         mock_genai.Client.assert_called_once_with(api_key="test-key")
 
-    @patch("app.services.llm_service.new_genai")
+    @patch("app.services.gemini_client.genai")
     def test_the_gemini_budget_is_capped_at_what_the_model_can_emit(self, _mock_genai):
         with patch.object(
-            LLMService, "_gemini_pnml_generate_once", side_effect=[VALID_NET]
+            LLMService, "_gemini_generate_once", side_effect=[VALID_NET]
         ) as mocked:
             self.service.generate_pnml(
                 api_key="test-key",
@@ -710,15 +710,15 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
     def test_both_providers_are_asked_for_the_same_output_budget(self):
         # The shared budget; only a model's hard ceiling may lower it.
         generation, mocked = self._generate([VALID_NET])
-        self.assertEqual(mocked.call_args.kwargs["max_completion_tokens"], 32768)
+        self.assertEqual(mocked.call_args.kwargs["max_output_tokens"], 32768)
 
     def test_a_configured_gemini_host_becomes_a_base_url(self):
-        # The old SDK took a bare host; HttpOptions.base_url needs a scheme.
+        # It is configured as a bare host; HttpOptions.base_url needs a scheme.
         self.assertEqual(
-            _as_base_url("generativelanguage.googleapis.com"),
+            as_base_url("generativelanguage.googleapis.com"),
             "https://generativelanguage.googleapis.com",
         )
-        self.assertEqual(_as_base_url("http://proxy.local/"), "http://proxy.local")
+        self.assertEqual(as_base_url("http://proxy.local/"), "http://proxy.local")
 
 
 class TestTokenUsageExtraction(unittest.TestCase):

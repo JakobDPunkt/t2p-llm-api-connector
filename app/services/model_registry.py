@@ -2,8 +2,8 @@
 
 This is the single source of truth used by both:
 
-* ``GET /models``: to advertise the available provider/model pairs, and
-* ``POST /generate``: to validate the requested provider and to decide which
+* ``GET /models`` — to advertise the available provider/model pairs, and
+* ``POST /generate`` — to validate the requested provider and to decide which
     ``LLMService`` method handles the call.
 
 Keeping the registry here (instead of inline in the routes) means the advertised
@@ -15,8 +15,9 @@ import os
 import urllib.error
 import urllib.request
 
-import google.generativeai as genai
 from openai import OpenAI
+
+from app.services.gemini_client import build_client as build_gemini_client
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +69,11 @@ def _discover_openai_models(api_key, base_url=None):
 
 
 def _discover_gemini_models(api_key, api_endpoint=None):
-    kwargs = {"api_key": api_key}
-    if api_endpoint:
-        kwargs["client_options"] = {"api_endpoint": api_endpoint}
-    genai.configure(**kwargs)
+    client = build_gemini_client(api_key, api_endpoint=api_endpoint)
     discovered = []
-    for item in genai.list_models():
-        methods = getattr(item, "supported_generation_methods", []) or []
-        if "generateContent" not in methods:
+    for item in client.models.list():
+        actions = getattr(item, "supported_actions", None) or []
+        if "generateContent" not in actions:
             continue
         name = getattr(item, "name", "") or ""
         discovered.append(name.removeprefix("models/"))

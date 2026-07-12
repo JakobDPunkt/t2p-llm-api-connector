@@ -341,7 +341,7 @@ class TestGeminiAdapterMirrorsOpenAI(unittest.TestCase):
         return SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
 
     def _call(self, text, finish_reason="STOP", schema=None):
-        return LLMService._gemini_pnml_generate_once(
+        return LLMService._gemini_generate_once(
             self._client(text, finish_reason), "sys", "gemini-2.0-flash", "t", 8192,
             schema=schema,
         )
@@ -376,6 +376,31 @@ class TestGeminiAdapterMirrorsOpenAI(unittest.TestCase):
 
         with self.assertRaises(EmptyResponseError):
             self._call("")
+
+    def test_a_transient_failure_is_retried_as_on_openai(self):
+        # An overloaded provider is not a property of the format or of the
+        # vendor: both adapters go through the same retry, so the same 503 must
+        # not fail on Gemini where it heals on OpenAI.
+        calls = []
+
+        class _Overloaded(RuntimeError):
+            code = 503
+
+        def generate_content(model, contents, config):
+            calls.append(1)
+            if len(calls) < 3:
+                raise _Overloaded("the model is overloaded")
+            return SimpleNamespace(text="<pnml/>", candidates=[], usage_metadata=None)
+
+        client = SimpleNamespace(
+            models=SimpleNamespace(generate_content=generate_content)
+        )
+        with patch("app.services.llm_service._TRANSIENT_BACKOFF_S", 0):
+            text = LLMService._gemini_generate_once(
+                client, "sys", "gemini-2.0-flash", "t", 8192
+            )
+        self.assertEqual(text, "<pnml/>")
+        self.assertEqual(len(calls), 3)
 
 
 class TestSharedPromptSemantics(unittest.TestCase):

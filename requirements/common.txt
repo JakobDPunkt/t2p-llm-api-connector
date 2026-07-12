@@ -4,9 +4,10 @@ flask_cors==4.0.0
 flasgger==0.9.7.1
 flask-wtf==1.2.1
 openai==1.79.0
-google-generativeai==0.8.5
-# The direct-PNML path only: the deprecated SDK above cannot express a schema's
-# property order, which is what makes the model plan before it builds.
+# The unified Google SDK, replacing the deprecated google-generativeai: it
+# builds a client per API key (the old one configured the key process-wide,
+# which raced between concurrent requests) and compiles a Pydantic schema
+# including its property order, which the direct-PNML JSON path relies on.
 google-genai==2.9.0
 # Schema source for the direct-PNML JSON path; both provider SDKs compile it.
 # Already present transitively via openai; pinned here because we import it.

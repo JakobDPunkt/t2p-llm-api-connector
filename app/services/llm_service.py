@@ -4,12 +4,12 @@ import random
 import time
 from collections import namedtuple
 
-import google.generativeai as genai
-from google import genai as new_genai
 from flask import current_app
+from google import genai
 from openai import OpenAI
 
 from app.services import model_registry
+from app.services.gemini_client import build_client as build_gemini_client
 from app.services.model_validator import ModelValidator
 from app.services.pnml_json import (
     PetriNet,
@@ -167,6 +167,11 @@ PNML_FORMATS = {
 # passes because it carries the previous document and its issues).
 _PNML_MAX_CORRECTIONS = 3
 
+# One output budget for the standard ``/generate`` path, both providers. A BPMN
+# JSON model is the same size whichever model writes it, so the budget is a
+# property of the artefact, not of the provider.
+_BPMN_MAX_OUTPUT_TOKENS = 4096
+
 # One output budget for the direct-PNML path, both providers. The /generate
 # defaults are too small here: a full PNML document is far longer than the
 # standard path's BPMN JSON, and on GPT-5 variants reasoning tokens draw from
@@ -209,18 +214,6 @@ class TruncatedResponseError(ValueError):
     def __init__(self, *args, raw_reply=None):
         super().__init__(*args)
         self.raw_reply = raw_reply
-
-
-def _as_base_url(endpoint):
-    """A configured Gemini host as the base URL the unified SDK expects.
-
-    ``GEMINI_API_ENDPOINT`` is a bare host ("generativelanguage.googleapis.com"):
-    the deprecated SDK took it as ``client_options={"api_endpoint": ...}``, while
-    ``HttpOptions.base_url`` needs a scheme. Values that already carry one pass
-    through, so an http:// proxy stays http://.
-    """
-    endpoint = endpoint.strip().rstrip("/")
-    return endpoint if "://" in endpoint else f"https://{endpoint}"
 
 
 def _is_truncation_reason(finish_reason):
@@ -663,10 +656,14 @@ class LLMService:
         system_prompt,
         model,
         prompt,
-        max_completion_tokens=4096,
+        max_output_tokens=_BPMN_MAX_OUTPUT_TOKENS,
         usage_sink=None,
         schema=None,
     ):
+        """One OpenAI call. Mirrors :meth:`_gemini_generate_once` argument for
+        argument, so a caller states what it wants -- budget, schema, token
+        record -- and only the provider behind it differs.
+        """
         model_name = (model or "").lower()
         request_kwargs = {
             "messages": [
@@ -674,7 +671,7 @@ class LLMService:
                 {"role": "user", "content": prompt},
             ],
             "model": model,
-            "max_completion_tokens": max_completion_tokens,
+            "max_completion_tokens": max_output_tokens,
         }
         # A Pydantic schema goes through `parse`, which compiles it into a
         # strict JSON schema; `create` only accepts a pre-built dict. The reply
@@ -761,23 +758,23 @@ class LLMService:
         return content
 
     @staticmethod
-    def _gemini_pnml_generate_once(
-        client, system_prompt, model, prompt, max_output_tokens, usage_sink=None, schema=None
+    def _gemini_generate_once(
+        client,
+        system_prompt,
+        model,
+        prompt,
+        max_output_tokens=_BPMN_MAX_OUTPUT_TOKENS,
+        usage_sink=None,
+        schema=None,
     ):
-        """The direct-PNML path's Gemini call, mirroring ``_openai_generate_once``.
+        """One Gemini call, mirroring :meth:`_openai_generate_once` argument for
+        argument: same budget, greedy decoding, transient failures retried,
+        tokens recorded before the reply is judged, and truncation checked before
+        emptiness -- a reply cut off at the token limit is exhausted budget, not
+        a refusal, even when nothing came back with it.
 
-        On the unified ``google-genai`` SDK rather than the deprecated
-        ``google-generativeai`` the standard path still uses. Two reasons, both
-        load-bearing here: only this SDK compiles a Pydantic class into a
-        provider schema -- including ``property_ordering``, without which the
-        model may write the arcs before the plan that is supposed to govern them
-        -- and its per-call client replaces a process-wide ``genai.configure``,
-        which under concurrent requests carrying different API keys was a race.
-
-        Symmetric with the OpenAI adapter by design: same budget, greedy
-        decoding, tokens recorded before a reply is judged, and truncation
-        checked before emptiness -- a reply cut off at the token limit is
-        exhausted budget, not a refusal, even when nothing came back with it.
+        Both endpoints call this: the standard path passes no schema, the
+        direct-PNML path passes one. The provider differs; the behaviour does not.
         """
         config = {
             "system_instruction": system_prompt,
@@ -795,7 +792,7 @@ class LLMService:
             lambda: client.models.generate_content(
                 model=model,
                 contents=prompt,
-                config=new_genai.types.GenerateContentConfig(**config),
+                config=genai.types.GenerateContentConfig(**config),
             ),
             model,
         )
@@ -805,7 +802,9 @@ class LLMService:
 
         text = ((getattr(response, "text", None)) or "").strip()
         candidates = getattr(response, "candidates", None) or []
-        finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+        finish_reason = (
+            getattr(candidates[0], "finish_reason", None) if candidates else None
+        )
         if _is_truncation_reason(finish_reason):
             logger.warning(
                 "Gemini stopped at the token limit (model=%s, content_len=%d)",
@@ -824,33 +823,6 @@ class LLMService:
                 finish_reason,
             )
             raise EmptyResponseError("Gemini returned empty response text.")
-        return text
-
-    @staticmethod
-    def _gemini_generate_once(gen_model, prompt, max_output_tokens=2048, usage_sink=None):
-        config_kwargs = {
-            "temperature": 0.0,
-            "top_k": 1,
-            "top_p": 1.0,
-            "max_output_tokens": max_output_tokens,
-        }
-        response = gen_model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(**config_kwargs),
-        )
-        # Recorded before the checks below; see _openai_generate_once.
-        if usage_sink is not None:
-            usage_sink.append(_gemini_token_usage(response))
-        text = ((response.text or "") if hasattr(response, "text") else "").strip()
-        if not text:
-            raise EmptyResponseError("Gemini returned empty response text.")
-        candidates = getattr(response, "candidates", None) or []
-        finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
-        if _is_truncation_reason(finish_reason):
-            logger.warning("Gemini truncated the reply at the token limit.")
-            raise TruncatedResponseError(
-                "Gemini stopped at the output token limit.", raw_reply=text
-            )
         return text
 
     def call_openai(
@@ -980,15 +952,9 @@ class LLMService:
         )
 
         gemini_api_endpoint = self._config_value("GEMINI_API_ENDPOINT")
-        genai_kwargs = {"api_key": api_key}
         if gemini_api_endpoint:
-            genai_kwargs["client_options"] = {"api_endpoint": gemini_api_endpoint}
             logger.info("Using configured Gemini API endpoint")
-        genai.configure(**genai_kwargs)
-
-        gen_model = genai.GenerativeModel(
-            model_name=model, system_instruction=system_prompt
-        )
+        client = build_gemini_client(api_key, api_endpoint=gemini_api_endpoint)
 
         try:
             if prompting_strategy == "few_shot":
@@ -997,7 +963,7 @@ class LLMService:
                     return self._run_few_shot_orchestration(
                         user_text,
                         lambda step_prompt: self._gemini_generate_once(
-                            gen_model, step_prompt
+                            client, system_prompt, model, step_prompt
                         ),
                     )
                 except Exception as orchestration_error:
@@ -1007,7 +973,7 @@ class LLMService:
                     raise
 
             logger.info("Calling Gemini generate_content (model=%s)", model)
-            text = self._gemini_generate_once(gen_model, prompt)
+            text = self._gemini_generate_once(client, system_prompt, model, prompt)
             duration = time.time() - start_time
             logger.info(
                 "Gemini response received in %.3fs (len=%d)",
@@ -1085,19 +1051,15 @@ class LLMService:
                     system_prompt,
                     model,
                     prompt,
-                    max_completion_tokens=_PNML_MAX_OUTPUT_TOKENS,
+                    max_output_tokens=_PNML_MAX_OUTPUT_TOKENS,
                     usage_sink=usages,
                     schema=pnml_format.schema,
                 )
 
         elif method_name == "call_gemini":
-            client_kwargs = {"api_key": api_key}
-            gemini_api_endpoint = self._config_value("GEMINI_API_ENDPOINT")
-            if gemini_api_endpoint:
-                client_kwargs["http_options"] = new_genai.types.HttpOptions(
-                    base_url=_as_base_url(gemini_api_endpoint)
-                )
-            client = new_genai.Client(**client_kwargs)
+            client = build_gemini_client(
+                api_key, api_endpoint=self._config_value("GEMINI_API_ENDPOINT")
+            )
             # The shared budget, capped at what the model can actually emit.
             budget = min(_PNML_MAX_OUTPUT_TOKENS, _GEMINI_HARD_OUTPUT_LIMIT)
             if budget < _PNML_MAX_OUTPUT_TOKENS:
@@ -1110,7 +1072,7 @@ class LLMService:
                 )
 
             def generate_once(prompt):
-                return self._gemini_pnml_generate_once(
+                return self._gemini_generate_once(
                     client,
                     system_prompt,
                     model,
