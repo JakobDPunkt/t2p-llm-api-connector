@@ -61,6 +61,11 @@ class BaseConfig:
     )
     REDIS_USE_MOCK = _env_bool("REDIS_USE_MOCK", default=False)
     INTERNAL_ASYNC_ENABLED = _env_bool("INTERNAL_ASYNC_ENABLED", default=True)
+    # The comparison demo page at /demo. On by default so the experiment can be
+    # tried out wherever the connector runs; a deployment that wants only the
+    # API surface sets PNML_DEMO_ENABLED=false. The endpoints it drives stay
+    # available either way.
+    PNML_DEMO_ENABLED = _env_bool("PNML_DEMO_ENABLED", default=True)
     ASYNC_JOB_TTL_SECONDS = int(os.environ.get("ASYNC_JOB_TTL_SECONDS") or 3600)
     SECRET_KEY = (
         os.environ.get("SECRET_KEY")

@@ -842,6 +842,17 @@ class TestDemoPage(unittest.TestCase):
         self.assertEqual(response.mimetype, "text/html")
         self.assertIn(b"Text to PNML Demo", response.data)
 
+    def test_the_demo_page_can_be_switched_off_without_losing_the_endpoints(self):
+        # A deployment may want the API surface without the experiment's UI.
+        self.app.config["PNML_DEMO_ENABLED"] = False
+
+        self.assertEqual(self.client.get("/demo").status_code, 404)
+        # The endpoint is still there: it rejects the call for the missing key,
+        # not because it stopped existing.
+        self.assertEqual(
+            self.client.post("/generate_pnml_direct", json={}).status_code, 401
+        )
+
 
 class TestGeneratePnmlRoute(unittest.TestCase):
     @patch("app.model_registry.refresh_model_cache")

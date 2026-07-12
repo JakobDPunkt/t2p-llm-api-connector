@@ -26,7 +26,7 @@ from flask import Response, current_app, jsonify, request
 from flask_cors import cross_origin
 
 from app.api import bp
-from app.api.errors import provider_error_response
+from app.api.errors import error_response, provider_error_response
 from app.api.routes import (
     REQUEST_COUNT,
     REQUEST_LATENCY,
@@ -81,7 +81,11 @@ def pnml_demo():
     that calls ``/generate_pnml_direct`` (this connector) and the live deployment's
     ``/v2/generate/pnml`` side by side.
 
+    A deployment that wants the API surface without the experiment's UI sets
+    ``PNML_DEMO_ENABLED=false``; the endpoints themselves stay reachable.
     """
+    if not current_app.config.get("PNML_DEMO_ENABLED", True):
+        return error_response(404, "not_found", "The demo page is disabled.")
     return current_app.send_static_file("pnml_demo.html")
 
 
