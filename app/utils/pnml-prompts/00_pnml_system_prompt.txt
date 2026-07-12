@@ -23,8 +23,6 @@ Plan first (ACTIVITIES and BRANCHES above); the plan is not part of the answer, 
 
 STYLE:
 - Unnamed nodes carry no <name> element.
-- Keep the XML compact like the examples: one element per line, no indentation.
-- The answer begins with the XML declaration and ends with </pnml>. No prose, no explanation, no markdown fence, before, between or after the elements.
 
 EXAMPLES (they illustrate the mapping; always model the actual description):
 

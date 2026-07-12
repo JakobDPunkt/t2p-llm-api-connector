@@ -23,8 +23,6 @@ from app.services.pnml_validator import PnmlValidator
 from config import BaseConfig, TestingConfig
 
 MINIMAL = {
-    "activities": ["check order"],
-    "branches": [],
     "arcs": [
         {"source": "p_start", "target": "t_check_order"},
         {"source": "t_check_order", "target": "p_end"},
@@ -57,14 +55,12 @@ class TestSchema(unittest.TestCase):
                     "would compile different 'required' lists",
                 )
 
-    def test_field_order_puts_the_plan_before_the_arcs(self):
+    def test_field_order_puts_the_arcs_before_the_glossary(self):
         # Both compilers preserve this order (OpenAI generates in schema order,
-        # google-genai emits property_ordering from it), so it is the model's
-        # scratchpad: reorder these and the plan stops governing the arcs.
-        self.assertEqual(
-            list(PetriNet.model_fields),
-            ["activities", "branches", "arcs", "nodes"],
-        )
+        # google-genai emits property_ordering from it): the arcs -- the net
+        # itself -- are committed before the glossary that only labels them, so
+        # a node cannot be invented before the flow that would reach it.
+        self.assertEqual(list(PetriNet.model_fields), ["arcs", "nodes"])
         self.assertEqual(list(Node.model_fields), ["id", "kind", "name"])
 
     def test_routing_nodes_are_expressible_as_nameless(self):

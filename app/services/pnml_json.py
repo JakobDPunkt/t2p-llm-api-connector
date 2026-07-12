@@ -88,18 +88,16 @@ class PetriNet(BaseModel):
 
     Field order matters and survives both compilers -- OpenAI generates in
     schema order, google-genai emits ``property_ordering`` from the field order.
-    The model therefore fills the object in this order: the plan (``activities``,
-    ``branches``) before the ``arcs``, and the arcs before the ``nodes`` glossary
-    that labels them. That is the order the prompt asks for, and it is why a node
-    cannot be invented before the flow that would have to reach it. Reordering
-    these fields silently removes the model's scratchpad.
+    The model fills ``arcs`` before the ``nodes`` glossary that labels them, so a
+    node cannot be invented before the flow that would have to reach it.
 
-    ``activities`` and ``branches`` are never read: they exist so the model
-    commits to a plan while it still can act on one.
+    The prompt still asks the model to plan the activities and branch points
+    first, but -- as on the XML path -- that plan is reasoning, not output: a
+    measured A/B on both a strong and a weak model showed emitting it as schema
+    fields left soundness unchanged (first-shot and after correction) while
+    costing tokens on every call, so it is no longer a field.
     """
 
-    activities: list[str]
-    branches: list[str]
     arcs: list[Arc]
     nodes: list[Node]
 
