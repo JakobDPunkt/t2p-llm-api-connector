@@ -690,8 +690,10 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         self.assertEqual(generation.best.issues, [])
         mocked.assert_called_once()
         # A client per call, not a process-wide genai.configure: concurrent
-        # requests carry different API keys.
-        mock_genai.Client.assert_called_once_with(api_key="test-key")
+        # requests carry different API keys. The key is what this asserts; a
+        # deployment may also configure a host, which the client then carries.
+        mock_genai.Client.assert_called_once()
+        self.assertEqual(mock_genai.Client.call_args.kwargs["api_key"], "test-key")
 
     @patch("app.services.gemini_client.genai")
     def test_both_providers_are_asked_for_the_same_output_budget(self, _mock_genai):
