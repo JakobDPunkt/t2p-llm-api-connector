@@ -26,40 +26,23 @@ from flask import Response, current_app, jsonify, request
 from flask_cors import cross_origin
 
 from app.api import bp
+from app.api.errors import provider_error_response
 from app.api.routes import (
     REQUEST_COUNT,
     REQUEST_LATENCY,
     _extract_bearer_key,
-    _is_quota_error,
     _llm_service,
-    _v2_error,
     _validate_generate_payload,
 )
 from app.services import model_registry
-from app.services.llm_service import (
-    PNML_FORMATS,
-    EmptyResponseError,
-    TruncatedResponseError,
-)
+from app.services.llm_service import PNML_FORMATS
 
 logger = logging.getLogger(__name__)
 
-#: How much of a non-PNML provider reply to surface in the debug view.
-_REPLY_EXCERPT_LIMIT = 500
 
 def _debug_requested():
     """Whether the caller asked for the attempt-history JSON (demo only)."""
     return request.args.get("debug") == "1"
-
-
-def _reply_excerpt(reply):
-    """A single-line, length-capped excerpt of a raw provider reply."""
-    if not reply:
-        return ""
-    collapsed = " ".join(str(reply).split())
-    if len(collapsed) <= _REPLY_EXCERPT_LIMIT:
-        return collapsed
-    return collapsed[:_REPLY_EXCERPT_LIMIT] + " […]"
 
 
 def _tokens(usage):
@@ -97,6 +80,7 @@ def pnml_demo():
     Demo tooling analogous to the Swagger UI at ``/docs``: one static page
     that calls ``/generate_pnml_direct`` (this connector) and the live deployment's
     ``/v2/generate/pnml`` side by side.
+
     """
     return current_app.send_static_file("pnml_demo.html")
 
@@ -196,57 +180,11 @@ def _generate_pnml_response(fmt, endpoint, prompt_key):
         return response
 
     except Exception as e:
-        if isinstance(e, TruncatedResponseError):
-            status = "400"
-            excerpt = _reply_excerpt(getattr(e, "raw_reply", None))
-            logger.warning(
-                "%s truncated at token limit: %s (reply: %s)",
-                endpoint,
-                e,
-                excerpt or "<empty>",
-            )
-            return _v2_error(
-                400,
-                "response_truncated",
-                (
-                    "The model reached its output token limit before finishing "
-                    "the net. The process may be too long for this model. Try a "
-                    "shorter description or a larger model."
-                ),
-                details=[f"Partial reply: {excerpt}"] if excerpt else None,
-            )
-
-        if isinstance(e, EmptyResponseError):
-            status = "400"
-            excerpt = _reply_excerpt(getattr(e, "raw_reply", None))
-            logger.warning(
-                "%s rejected provider response: %s (reply: %s)",
-                endpoint,
-                e,
-                excerpt or "<empty>",
-            )
-            return _v2_error(
-                400,
-                "invalid_request",
-                f"The LLM provider returned no usable {PNML_FORMATS[fmt].artefact}.",
-                details=[f"Provider reply: {excerpt}"] if excerpt else None,
-            )
-
-        if _is_quota_error(e):
-            status = "429"
-            logger.warning("%s provider quota exceeded: %s", endpoint, e)
-            return _v2_error(
-                429,
-                "rate_limited",
-                (
-                    "Provider quota or rate limit exceeded. "
-                    "Try again later or use another model."
-                ),
-            )
-
-        status = "500"
-        logger.exception("%s failed: %s", endpoint, e)
-        return _v2_error(500, "upstream_error", "The LLM provider call failed.")
+        body, status_code = provider_error_response(
+            endpoint, e, artefact=PNML_FORMATS[fmt].artefact
+        )
+        status = str(status_code)
+        return body, status_code
     finally:
         REQUEST_COUNT.labels(
             method="POST", endpoint=endpoint, status=status

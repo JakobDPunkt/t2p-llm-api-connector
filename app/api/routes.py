@@ -7,11 +7,16 @@ from flasgger import swag_from
 from flask import current_app, jsonify, request
 
 from app.api import bp
+from app.api.errors import error_response, provider_error_response, provider_job_error
 from app.services import model_registry
 from app.services.async_jobs import AsyncJobStore
-from app.services.llm_service import EmptyResponseError, LLMService
+from app.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
+
+#: What a failed call on this path was meant to produce. The error pipeline
+#: names it in the message, so the caller learns which artefact never arrived.
+BPMN_ARTEFACT = "BPMN JSON model"
 
 # Prometheus Metriken
 REQUEST_COUNT = prometheus_client.Counter(
@@ -39,14 +44,14 @@ def _job_store():
 
 def _validate_generate_payload(api_key, data):
     if api_key is None:
-        return _v2_error(401, "unauthorized", "Missing or malformed Authorization header.")
+        return error_response(401, "unauthorized", "Missing or malformed Authorization header.")
 
     if not isinstance(data, dict):
-        return _v2_error(400, "invalid_request", "Request body must be JSON.")
+        return error_response(400, "invalid_request", "Request body must be JSON.")
 
     missing = [f for f in ("user_text", "provider", "model") if not data.get(f)]
     if missing:
-        return _v2_error(
+        return error_response(
             400,
             "invalid_request",
             f"Missing or empty field(s): {', '.join(missing)}.",
@@ -54,7 +59,7 @@ def _validate_generate_payload(api_key, data):
 
     if data.get("prompting_strategy", "zero_shot") not in _SUPPORTED_PROMPTING_STRATEGIES:
         allowed = ", ".join(sorted(_SUPPORTED_PROMPTING_STRATEGIES))
-        return _v2_error(
+        return error_response(
             400,
             "invalid_request",
             f"Invalid prompting_strategy '{data.get('prompting_strategy')}'. Allowed values: {allowed}.",
@@ -72,7 +77,7 @@ def _validate_generate_payload(api_key, data):
         )
 
     if not model_registry.is_valid(provider, model):
-        return _v2_error(
+        return error_response(
             400,
             "invalid_provider",
             f"Unknown provider/model: {provider}/{model}.",
@@ -100,27 +105,13 @@ def _run_async_generate(app, job_id, api_key, data):
                 result={"raw_response": raw_response},
                 error=None,
             )
-        except EmptyResponseError as e:
-            store.update_status(
-                job_id,
-                "failed",
-                error={
-                    "code": "invalid_request",
-                    "message": "The LLM provider returned an empty response.",
-                    "detail": str(e),
-                },
-            )
         except Exception as e:
-            error_code = "rate_limited" if _is_quota_error(e) else "upstream_error"
-            error_message = (
-                "Provider quota or rate limit exceeded. Try again later or use another model."
-                if error_code == "rate_limited"
-                else "The LLM provider call failed."
-            )
             store.update_status(
                 job_id,
                 "failed",
-                error={"code": error_code, "message": error_message, "detail": str(e)},
+                error=provider_job_error(
+                    "/internal/jobs/generate", e, artefact=BPMN_ARTEFACT
+                ),
             )
 
 
@@ -133,18 +124,6 @@ def _run_async_generate(app, job_id, api_key, data):
 # can relay 4xx client errors unchanged.
 
 
-def _v2_error(status_code, code, message, details=None):
-    """Build the standard connector error body and status tuple.
-
-    ``details`` is an optional list of extra diagnostic strings, surfaced by
-    the demo's error banner (contract: ``{"error": {code, message, details?}}``).
-    """
-    error = {"code": code, "message": message}
-    if details:
-        error["details"] = details
-    return jsonify({"error": error}), status_code
-
-
 def _extract_bearer_key():
     """Return the raw API key from a well-formed ``Authorization: Bearer <key>``.
 
@@ -155,19 +134,6 @@ def _extract_bearer_key():
     if len(parts) == 2 and parts[0].lower() == "bearer" and parts[1]:
         return parts[1]
     return None
-
-
-def _is_quota_error(exc):
-    """Return True for provider quota/rate-limit style exceptions."""
-    text = str(exc or "").lower()
-    indicators = (
-        "quota",
-        "resourceexhausted",
-        "too many requests",
-        "rate limit",
-        "perday",
-    )
-    return any(token in text for token in indicators)
 
 
 @bp.route("/generate", methods=["POST"])
@@ -263,30 +229,11 @@ def generate():
         return jsonify({"raw_response": raw_response}), 200
 
     except Exception as e:
-        if isinstance(e, EmptyResponseError):
-            status = "400"
-            logger.warning("/generate rejected empty provider response: %s", e)
-            return _v2_error(
-                400,
-                "invalid_request",
-                "The LLM provider returned an empty response.",
-            )
-
-        if _is_quota_error(e):
-            status = "429"
-            logger.warning("/generate provider quota exceeded: %s", e)
-            return _v2_error(
-                429,
-                "rate_limited",
-                (
-                    "Provider quota or rate limit exceeded. "
-                    "Try again later or use another model."
-                ),
-            )
-
-        status = "500"
-        logger.exception("/generate failed: %s", e)
-        return _v2_error(500, "upstream_error", "The LLM provider call failed.")
+        body, status_code = provider_error_response(
+            "/generate", e, artefact=BPMN_ARTEFACT
+        )
+        status = str(status_code)
+        return body, status_code
     finally:
         REQUEST_COUNT.labels(method="POST", endpoint="/generate", status=status).inc()
         REQUEST_LATENCY.labels(method="POST", endpoint="/generate").observe(
@@ -298,7 +245,7 @@ def generate():
 def internal_generate_submit():
     """Internal-only async submit endpoint used by t2p orchestration."""
     if not current_app.config.get("INTERNAL_ASYNC_ENABLED", True):
-        return _v2_error(404, "not_found", "Internal async endpoint is disabled.")
+        return error_response(404, "not_found", "Internal async endpoint is disabled.")
 
     api_key = _extract_bearer_key()
     data = request.get_json(silent=True)
@@ -333,12 +280,12 @@ def internal_generate_submit():
 def internal_generate_status(job_id):
     """Internal-only async status endpoint used by t2p orchestration."""
     if not current_app.config.get("INTERNAL_ASYNC_ENABLED", True):
-        return _v2_error(404, "not_found", "Internal async endpoint is disabled.")
+        return error_response(404, "not_found", "Internal async endpoint is disabled.")
 
     store = _job_store()
     payload = store.get(job_id)
     if payload is None:
-        return _v2_error(404, "not_found", "Unknown or expired job id.")
+        return error_response(404, "not_found", "Unknown or expired job id.")
 
     response = {
         "job_id": payload["job_id"],
@@ -406,7 +353,7 @@ def models():
     except Exception as e:
         status = "500"
         logger.exception("/models failed: %s", e)
-        return _v2_error(500, "internal_error", "Could not list models.")
+        return error_response(500, "internal_error", "Could not list models.")
     finally:
         REQUEST_COUNT.labels(method="GET", endpoint="/models", status=status).inc()
         REQUEST_LATENCY.labels(method="GET", endpoint="/models").observe(
@@ -485,7 +432,7 @@ def provider_health():
             timeout_seconds = int(timeout_raw)
         except ValueError:
             status = "400"
-            return _v2_error(400, "invalid_request", "timeout must be an integer.")
+            return error_response(400, "invalid_request", "timeout must be an integer.")
 
         try:
             diagnostics = model_registry.provider_connectivity(
@@ -494,7 +441,7 @@ def provider_health():
             )
         except ValueError as exc:
             status = "400"
-            return _v2_error(400, "invalid_request", str(exc))
+            return error_response(400, "invalid_request", str(exc))
 
         all_reachable = all(item.get("reachable") for item in diagnostics)
         response = {
@@ -510,7 +457,7 @@ def provider_health():
     except Exception as exc:
         status = "500"
         logger.exception("/health/providers failed: %s", exc)
-        return _v2_error(500, "internal_error", "Provider health check failed.")
+        return error_response(500, "internal_error", "Provider health check failed.")
     finally:
         REQUEST_COUNT.labels(
             method="GET", endpoint="/health/providers", status=status

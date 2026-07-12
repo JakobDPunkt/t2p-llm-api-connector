@@ -330,6 +330,31 @@ class TestV2Api(unittest.TestCase):
         self.assertEqual(response.get_json()["error"]["code"], "invalid_request")
 
     @patch("app.services.llm_service.build_gemini_client")
+    def test_generate_truncation_is_400_response_truncated(self, mock_build_client):
+        # The standard path answers through the same error pipeline as the
+        # direct-PNML endpoints: a reply cut off at the output-token limit is a
+        # 4xx, whose message t2p-2.0 relays to the user unchanged, rather than an
+        # opaque 500 that says only "the provider call failed".
+        client = self._mock_gemini(mock_build_client, content='{"tasks": [')
+        client.models.generate_content.return_value.candidates = [
+            MagicMock(finish_reason="MAX_TOKENS")
+        ]
+
+        response = self.client.post(
+            "/generate",
+            headers={"Authorization": "Bearer secret-token"},
+            json={
+                "user_text": "x",
+                "provider": "gemini",
+                "model": "gemini-2.0-flash",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        error = response.get_json()["error"]
+        self.assertEqual(error["code"], "response_truncated")
+        self.assertIn("BPMN JSON model", error["message"])
+
+    @patch("app.services.llm_service.build_gemini_client")
     def test_generate_gemini_quota_error_is_429_rate_limited(self, mock_build_client):
         client = self._mock_gemini(mock_build_client)
         client.models.generate_content.side_effect = RuntimeError(
