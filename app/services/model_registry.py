@@ -21,10 +21,13 @@ from app.services.gemini_client import build_client as build_gemini_client
 
 logger = logging.getLogger(__name__)
 
-# Fallback entries used only when provider discovery is unavailable.
+# Fallback entries used only when provider discovery is unavailable. A model a
+# provider has retired is worse than no fallback at all -- it is the one name a
+# caller without discovery will send, and it answers 404. So each entry names a
+# current mid-tier model of its provider.
 _FALLBACK_MODELS = {
     "openai": ["gpt-5-mini"],
-    "gemini": ["gemini-2.0-flash"],
+    "gemini": ["gemini-3.5-flash"],
 }
 
 # Maps a provider to the LLMService method name that dispatches the call.
