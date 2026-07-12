@@ -694,23 +694,24 @@ class TestPnmlCorrectionLoop(unittest.TestCase):
         mock_genai.Client.assert_called_once_with(api_key="test-key")
 
     @patch("app.services.gemini_client.genai")
-    def test_the_gemini_budget_is_capped_at_what_the_model_can_emit(self, _mock_genai):
+    def test_both_providers_are_asked_for_the_same_output_budget(self, _mock_genai):
+        # The budget is a property of the artefact, not of the provider: a net
+        # is the same size whoever writes it, and reasoning draws from this
+        # budget on both sides. Lowering it for Gemini truncated the long
+        # processes it otherwise models on the first try.
+        _, openai_call = self._generate([VALID_NET])
         with patch.object(
             LLMService, "_gemini_generate_once", side_effect=[VALID_NET]
-        ) as mocked:
+        ) as gemini_call:
             self.service.generate_pnml(
                 api_key="test-key",
                 provider="gemini",
-                model="gemini-2.0-flash",
+                model="gemini-3.5-flash",
                 user_text="ship the order",
                 system_prompt="prompt under test",
             )
-        self.assertEqual(mocked.call_args.kwargs["max_output_tokens"], 8192)
-
-    def test_both_providers_are_asked_for_the_same_output_budget(self):
-        # The shared budget; only a model's hard ceiling may lower it.
-        generation, mocked = self._generate([VALID_NET])
-        self.assertEqual(mocked.call_args.kwargs["max_output_tokens"], 32768)
+        self.assertEqual(openai_call.call_args.kwargs["max_output_tokens"], 32768)
+        self.assertEqual(gemini_call.call_args.kwargs["max_output_tokens"], 32768)
 
     def test_a_configured_gemini_host_becomes_a_base_url(self):
         # It is configured as a bare host; HttpOptions.base_url needs a scheme.

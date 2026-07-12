@@ -172,20 +172,16 @@ _PNML_MAX_CORRECTIONS = 3
 # property of the artefact, not of the provider.
 _BPMN_MAX_OUTPUT_TOKENS = 4096
 
-# One output budget for the direct-PNML path, both providers. The /generate
-# defaults are too small here: a full PNML document is far longer than the
-# standard path's BPMN JSON, and on GPT-5 variants reasoning tokens draw from
-# the same budget. At "medium" reasoning on a long process, 16384 was fully
-# consumed by reasoning on some models, yielding an empty reply; 32768 leaves
-# room for reasoning and the net.
+# One output budget for the direct-PNML path, both providers, uncapped by any
+# provider-specific ceiling: a model that cannot emit that many tokens clamps
+# the request rather than rejecting it (verified against Gemini, which accepts
+# a budget above its own output_token_limit). The /generate defaults are too
+# small here: a full PNML document is far longer than the standard path's BPMN
+# JSON, and reasoning tokens draw from the same budget on both providers -- the
+# Gemini 3 models spend up to 14000 of them on one net. At "medium" reasoning on
+# a long process, 16384 was fully consumed by reasoning on some models, yielding
+# an empty reply; 32768 leaves room for reasoning and the net.
 _PNML_MAX_OUTPUT_TOKENS = 32768
-
-# What a budget cannot equalize: a model's own ceiling. gemini-2.0-flash stops
-# at 8192 output tokens, so asking for more is not a larger budget but a
-# rejected request. The cap is applied per provider and logged when it bites,
-# because a Gemini net truncating where an OpenAI net does not is this limit
-# speaking, not the model being worse.
-_GEMINI_HARD_OUTPUT_LIMIT = 8192
 
 logger = logging.getLogger(__name__)
 
@@ -1060,16 +1056,6 @@ class LLMService:
             client = build_gemini_client(
                 api_key, api_endpoint=self._config_value("GEMINI_API_ENDPOINT")
             )
-            # The shared budget, capped at what the model can actually emit.
-            budget = min(_PNML_MAX_OUTPUT_TOKENS, _GEMINI_HARD_OUTPUT_LIMIT)
-            if budget < _PNML_MAX_OUTPUT_TOKENS:
-                logger.info(
-                    "Gemini output budget capped at %d of %d tokens (model=%s); "
-                    "a long process may truncate here where OpenAI would not",
-                    budget,
-                    _PNML_MAX_OUTPUT_TOKENS,
-                    model,
-                )
 
             def generate_once(prompt):
                 return self._gemini_generate_once(
@@ -1077,7 +1063,7 @@ class LLMService:
                     system_prompt,
                     model,
                     prompt,
-                    max_output_tokens=budget,
+                    max_output_tokens=_PNML_MAX_OUTPUT_TOKENS,
                     usage_sink=usages,
                     schema=pnml_format.schema,
                 )
