@@ -1,0 +1,7 @@
+A company onboards a new employee. HR receives the signed contract and checks whether all required documents are attached. If a document is missing, HR requests it from the employee and checks the file again, and this request-and-check repeats until the file is complete.
+
+Once the file is complete, two things happen at the same time: the IT department creates the user accounts and the facility team prepares the workplace. Only when both are finished does the supervisor run the welcome meeting.
+
+New employees who will work in the laboratory must additionally attend a safety briefing before their first day; for all other employees this briefing is skipped. Afterwards the employee starts working.
+
+At the end of the probation period the supervisor evaluates the employee. The employee is either confirmed permanently or the contract is terminated. In both cases HR archives the personnel file and closes the onboarding case.

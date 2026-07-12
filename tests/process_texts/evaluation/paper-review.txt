@@ -1,0 +1,7 @@
+A conference handles the review of a submitted paper. The program chair registers the submission and checks it against the formatting guidelines. A paper that violates the guidelines is desk-rejected immediately.
+
+Otherwise the chair assigns the paper to two reviewers. Both reviewers read the paper and write their reports independently and in parallel. The chair waits until both reports have arrived and then consolidates them into a decision.
+
+The decision is either accept, reject, or major revision. If a major revision is requested, the authors revise the paper and resubmit it, the chair then consolidates the reviewers' reassessment again, and this revise-and-reassess cycle repeats until the paper is finally accepted or rejected.
+
+An accepted paper is scheduled for a session in the program. A rejected paper is not. Whatever the outcome, the chair notifies the authors and closes the submission.

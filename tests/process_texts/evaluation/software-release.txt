@@ -1,0 +1,7 @@
+A team ships a software release. A release manager freezes the branch and starts the build. Once the build is ready, the unit test suite and the security scan run simultaneously on that build.
+
+The release manager waits for both results and then reviews them together. If either the tests or the scan failed, a developer fixes the defect, the build is started again, and the results are reviewed once more; this fix-and-rebuild cycle repeats until both the tests and the scan pass.
+
+When both pass, the manager writes the release notes. For a release that contains a database migration, the team additionally runs a migration rehearsal on the staging system; releases without a migration skip this rehearsal.
+
+Afterwards the manager asks the product owner for the go decision. The product owner either approves the rollout, in which case the release is deployed to production and monitored for one hour, or cancels it, in which case the branch is unfrozen. In both cases the manager records the outcome in the release log and the release process is finished.

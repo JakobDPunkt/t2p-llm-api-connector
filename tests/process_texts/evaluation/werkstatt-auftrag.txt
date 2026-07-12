@@ -1,0 +1,7 @@
+Eine Kfz-Werkstatt bearbeitet einen Reparaturauftrag. Der Serviceberater nimmt das Fahrzeug an und erstellt einen Auftrag. Anschließend prüft ein Mechaniker das Fahrzeug und erstellt einen Kostenvoranschlag.
+
+Der Kunde entscheidet über den Kostenvoranschlag. Lehnt er ab, wird das Fahrzeug unrepariert zurückgegeben. Stimmt er zu, beginnt die Reparatur.
+
+Während der Mechaniker das Fahrzeug repariert, bestellt die Teileabteilung gleichzeitig die benötigten Ersatzteile. Erst wenn die Reparatur abgeschlossen und die Teile geliefert sind, montiert der Mechaniker die Teile und führt eine Endkontrolle durch. Fällt die Endkontrolle negativ aus, wird nachgebessert und erneut kontrolliert, bis die Endkontrolle bestanden ist.
+
+Fahrzeuge, die älter als zehn Jahre sind, erhalten zusätzlich eine Sicherheitsprüfung; bei allen anderen Fahrzeugen entfällt sie. Danach erstellt der Serviceberater die Rechnung, der Kunde zahlt und holt das Fahrzeug ab. Sowohl nach der Abholung als auch nach einer Rückgabe ohne Reparatur wird der Auftrag geschlossen und die Hebebühne für den nächsten Auftrag freigegeben.

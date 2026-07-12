@@ -1,0 +1,7 @@
+An airport handles a checked bag. At the counter the agent weighs the bag and attaches a tag. An oversized bag is taken to the bulky-baggage desk, a normal bag is placed on the belt; from there on both are handled the same way.
+
+The bag then passes the security scanner. If the scanner image is unclear, an officer opens the bag for a manual inspection and the bag is scanned again; this inspect-and-rescan cycle repeats until the image is clear.
+
+A bag that the scanner clears is sorted to the departure gate. Bags belonging to passengers with a connecting flight are additionally re-labelled with the transfer route before sorting; bags on a direct flight skip this step.
+
+At the gate the loading crew loads the bag into the aircraft container. If the passenger does not board, the crew searches for the bag, offloads it, and returns it to the baggage service desk. Otherwise the bag flies with the aircraft. In both cases the handling system records the final bag status and the belt is released for the next bag.
